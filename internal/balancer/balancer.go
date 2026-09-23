@@ -16,12 +16,14 @@ type Balancer struct {
 	mu       sync.RWMutex
 	bal      balancer.Balancer
 	backends map[string]*config.BackendConfig
+	// models 模型 ID → 后端名 的反查表，用于具体模型 ID 的直连路由
+	// （启动时已校验模型 ID 全局唯一，这里每个模型最多对应一个后端）。
+	models   map[string]string
 	strategy string
 	// logger 为 nil 时不打池变更日志（测试默认静默）。
 	logger func(format string, args ...any)
 	// pools 按标签划分的后端子池：routing 规则的 pool 字段引用标签名，命中规则的
-	// 请求只从对应子池中选择。"tool_call" 子池即 tool_call: true（或 tags 含
-	// "tool_call"）的后端，GoClaw 流量（User-Agent 含 "GoClaw"）只允许路由到该子池。
+	// 请求只从对应子池中选择（如 "tool_call" 子池即 tags 含 "tool_call" 的后端）。
 	pools map[string]balancer.Balancer
 }
 
@@ -39,6 +41,7 @@ func (bb *Balancer) updateBalancer(backends []config.BackendConfig) {
 	defer bb.mu.Unlock()
 
 	bb.backends = make(map[string]*config.BackendConfig, len(backends))
+	bb.models = make(map[string]string)
 	wNodes := map[string]int{}
 	tagNodes := map[string]map[string]int{}
 
@@ -46,6 +49,9 @@ func (bb *Balancer) updateBalancer(backends []config.BackendConfig) {
 		b := &backends[i]
 		bb.backends[b.Name] = b
 		wNodes[b.Name] = b.Weight
+		if m := strings.TrimSpace(b.Model); m != "" {
+			bb.models[m] = b.Name
+		}
 		for tag := range b.EffectiveTags() {
 			if tagNodes[tag] == nil {
 				tagNodes[tag] = map[string]int{}
@@ -183,11 +189,6 @@ func (bb *Balancer) SelectFromTag(tag string) *config.BackendConfig {
 	return bb.selectFrom(bb.pools[tag])
 }
 
-// SelectToolCall 从 tool_call 子池选一个后端（SelectFromTag("tool_call") 的兼容别名）。
-func (bb *Balancer) SelectToolCall() *config.BackendConfig {
-	return bb.SelectFromTag("tool_call")
-}
-
 func (bb *Balancer) Update(backends []config.BackendConfig) {
 	bb.updateBalancer(backends)
 }
@@ -195,6 +196,18 @@ func (bb *Balancer) Update(backends []config.BackendConfig) {
 func (bb *Balancer) GetBackendByName(name string) *config.BackendConfig {
 	bb.mu.RLock()
 	defer bb.mu.RUnlock()
+	return bb.backends[name]
+}
+
+// GetBackendByModel 按模型 ID 反查池内后端（具体模型直连路由用）；
+// 池内无该模型 ID 的后端时返回 nil。
+func (bb *Balancer) GetBackendByModel(modelID string) *config.BackendConfig {
+	bb.mu.RLock()
+	defer bb.mu.RUnlock()
+	name, ok := bb.models[strings.TrimSpace(modelID)]
+	if !ok {
+		return nil
+	}
 	return bb.backends[name]
 }
 
@@ -237,11 +250,6 @@ func (bb *Balancer) SelectFromTagExcluding(tag string, exclude map[string]bool) 
 	return bb.selectExcluding(bb.pools[tag], exclude, func(c *config.BackendConfig) bool {
 		return c.EffectiveTags()[tag]
 	})
-}
-
-// SelectToolCallExcluding 与 SelectFromTagExcluding 相同，限定 tool_call 子池（兼容别名）。
-func (bb *Balancer) SelectToolCallExcluding(exclude map[string]bool) *config.BackendConfig {
-	return bb.SelectFromTagExcluding("tool_call", exclude)
 }
 
 // selectExcluding 反复按策略选点，跳过 exclude 中的节点以及不满足 filter 的节点，

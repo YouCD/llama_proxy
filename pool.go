@@ -35,7 +35,7 @@ func (s *Server) pushSchedEvent(kind string, extra map[string]any) {
 		s.schedEvents = s.schedEvents[len(s.schedEvents)-200:]
 	}
 	s.schedMu.Unlock()
-	s.hub.Broadcast(ev)
+	s.hub.BroadcastWithType("scheduler", ev)
 }
 
 // schedulerForwardBC 返回当前激活模式（coding/background）的后端 API Key 注入配置。
@@ -69,12 +69,13 @@ func (s *Server) syncLocalBackendNode() {
 			w = 1
 		}
 		merged = append(merged, config.BackendConfig{
-			Name:     localBackgroundBackendName,
-			URL:      base,
-			Weight:   w,
-			ToolCall: s.yamlCfg.Scheduling.Background.ToolCall,
-			Tags:     s.yamlCfg.Scheduling.Background.Tags,
-			APIKey:   s.yamlCfg.Scheduling.Background.APIKey,
+			Name:   localBackgroundBackendName,
+			URL:    base,
+			Weight: w,
+			Tags:   s.yamlCfg.Scheduling.Background.Tags,
+			APIKey: s.yamlCfg.Scheduling.Background.APIKey,
+			// 固化 background 模型的模型 ID：请求该 ID 时可经 GetBackendByModel 反查到本地节点直连。
+			Model: s.yamlCfg.Scheduling.Background.Model,
 		})
 	}
 	s.balancer.Update(merged)

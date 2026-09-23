@@ -258,6 +258,25 @@ onBeforeUnmount(() => {
   border-radius: var(--app-radius, 12px);
   padding: 16px;
   box-shadow: var(--app-card-shadow);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transform: translateY(0);
+}
+
+/* 白色主题下图表悬停：轻微抬起 + 虚影加深 */
+html:not(.dark) .chart-section {
+  box-shadow: 0 2px 4px rgba(16, 24, 40, 0.06),
+              0 1px 2px rgba(16, 24, 40, 0.04);
+}
+html:not(.dark) .chart-section:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 12px rgba(16, 24, 40, 0.12),
+              0 2px 4px rgba(16, 24, 40, 0.06);
+}
+
+/* 深色主题下保持原样式 */
+html.dark .chart-section:hover {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
 .chart-title {

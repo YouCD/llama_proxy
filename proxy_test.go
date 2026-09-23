@@ -38,7 +38,7 @@ func TestHandleProxyNonStreamingLlamaCppJSON(t *testing.T) {
 	proxy := httptest.NewServer(svc)
 	defer proxy.Close()
 
-	resp, err := proxy.Client().Post(proxy.URL+"/completion", "application/json", strings.NewReader(`{"model":"request-model","prompt":"hi"}`))
+	resp, err := proxy.Client().Post(proxy.URL+"/completion", "application/json", strings.NewReader(`{"model":"llm_prox","prompt":"hi"}`))
 	if err != nil {
 		t.Fatalf("proxy post: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestHandleProxyStreamingLifecycle(t *testing.T) {
 	defer proxy.Close()
 
 	client := proxy.Client()
-	reqBody := `{"model":"request-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	reqBody := `{"model":"llm_prox","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 
 	reqDone := make(chan error, 1)
 	go func() {
@@ -202,7 +202,7 @@ func TestProxyRecordPaths(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"model":"m","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+		_, _ = io.WriteString(w, `{"model":"llm_prox","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 	}))
 	defer backend.Close()
 
@@ -215,7 +215,7 @@ func TestProxyRecordPaths(t *testing.T) {
 
 	postJSON := func(path string) *http.Response {
 		resp, err := proxy.Client().Post(proxy.URL+path, "application/json",
-			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+			strings.NewReader(`{"model":"llm_prox","messages":[{"role":"user","content":"hi"}]}`))
 		if err != nil {
 			t.Fatalf("post %s: %v", path, err)
 		}
@@ -284,7 +284,6 @@ func TestSelectBackendWithBalancer(t *testing.T) {
 	}
 
 	cfg := config.Config{
-		AllowDynamicBackend: false,
 	}
 
 	svc := &Server{
@@ -295,7 +294,7 @@ func TestSelectBackendWithBalancer(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 20; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-		cand, _, _, err := svc.selectBackend(nil, req, context.Background())
+		cand, _, _, err := svc.selectBackend(nil, req, context.Background(), "")
 		if err != nil {
 			t.Fatalf("selectBackend: %v", err)
 		}
@@ -314,18 +313,14 @@ func TestSelectBackendWithBalancerNoDefault(t *testing.T) {
 		{Name: "b", URL: "http://b.example:8080", Weight: 1},
 	}
 
-	cfg := config.Config{
-		AllowDynamicBackend: true,
-	}
-
 	svc := &Server{
-		cfg:      cfg,
+		cfg:      config.Config{},
 		balancer: balancer.New(backends, "rr"),
 	}
 
 	for i := 0; i < 10; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-		cand, _, _, err := svc.selectBackend(nil, req, context.Background())
+		cand, _, _, err := svc.selectBackend(nil, req, context.Background(), "")
 		if err != nil {
 			t.Fatalf("selectBackend: %v", err)
 		}
@@ -336,33 +331,11 @@ func TestSelectBackendWithBalancerNoDefault(t *testing.T) {
 }
 
 func TestSelectBackendNoBackendConfigured(t *testing.T) {
-	// No balancer and no dynamic override -> error.
-	cfg := config.Config{AllowDynamicBackend: true}
-	svc := &Server{cfg: cfg}
+	// No balancer -> error.
+	svc := &Server{}
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-	if _, _, _, err := svc.selectBackend(nil, req, context.Background()); err == nil {
+	if _, _, _, err := svc.selectBackend(nil, req, context.Background(), ""); err == nil {
 		t.Fatal("expected error when no backend available")
-	}
-}
-
-func TestSelectBackendDynamicStillWorks(t *testing.T) {
-	cfg := config.Config{
-		AllowDynamicBackend: true,
-	}
-
-	svc := &Server{cfg: cfg}
-
-	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-	req.Header.Set("X-Backend-URL", "http://override.example:8080")
-	cand, _, _, err := svc.selectBackend(nil, req, context.Background())
-	if err != nil {
-		t.Fatalf("selectBackend: %v", err)
-	}
-	if cand.url != "http://override.example:8080" {
-		t.Fatalf("backend=%q", cand.url)
-	}
-	if cand.cfg != nil {
-		t.Fatalf("expected nil backend config for dynamic override, got %+v", cand.cfg)
 	}
 }
 
@@ -375,16 +348,14 @@ func TestSelectBackendBalancerReturnsConfig(t *testing.T) {
 	// Use weighted random so each backend can be hit many times and we can
 	// verify config is attached to the right URL.
 	svc := &Server{
-		cfg: config.Config{
-			AllowDynamicBackend: true,
-		},
+		cfg: config.Config{},
 		balancer: balancer.New(backends, "random"),
 	}
 
 	found := map[string]*config.BackendConfig{}
 	for i := 0; i < 200; i++ {
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
-		cand, _, _, err := svc.selectBackend(nil, req, context.Background())
+		cand, _, _, err := svc.selectBackend(nil, req, context.Background(), "")
 		if err != nil {
 			t.Fatalf("selectBackend: %v", err)
 		}
@@ -445,7 +416,6 @@ func TestHandleProxyWithModelRewriteAndAPIKey(t *testing.T) {
 	svc := &Server{
 		cfg: config.Config{
 			ListenAddr:          ":0",
-			AllowDynamicBackend: true,
 			DataDir:             dataDir,
 			RetentionDays:       14,
 			MaxRequestBytes:     2 << 20,
@@ -463,7 +433,7 @@ func TestHandleProxyWithModelRewriteAndAPIKey(t *testing.T) {
 	defer proxy.Close()
 
 	resp, err := proxy.Client().Post(proxy.URL+"/v1/chat/completions", "application/json",
-		strings.NewReader(`{"model":"client-model","messages":[]}`))
+		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
 	if err != nil {
 		t.Fatalf("proxy post: %v", err)
 	}
@@ -487,7 +457,7 @@ func TestHandleProxyBackendKeyDoesNotOverrideClientKeyWhenEmpty(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"model":"m","usage":{}}`)
+		_, _ = io.WriteString(w, `{"model":"llm_prox","usage":{}}`)
 	}))
 	defer backend.Close()
 
@@ -511,7 +481,6 @@ func TestHandleProxyBackendKeyDoesNotOverrideClientKeyWhenEmpty(t *testing.T) {
 	svc := &Server{
 		cfg: config.Config{
 			ListenAddr:          ":0",
-			AllowDynamicBackend: true,
 			DataDir:             dataDir,
 			RetentionDays:       14,
 			MaxRequestBytes:     2 << 20,
@@ -529,7 +498,7 @@ func TestHandleProxyBackendKeyDoesNotOverrideClientKeyWhenEmpty(t *testing.T) {
 	defer proxy.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"x","messages":[]}`))
+		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer client-key")
 	resp, err := proxy.Client().Do(req)
@@ -548,7 +517,7 @@ func TestHandleProxyStripsVersionPrefixWhenBackendHasV1(t *testing.T) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"model":"m","usage":{}}`)
+		_, _ = io.WriteString(w, `{"model":"llm_prox","usage":{}}`)
 	}))
 	defer backend.Close()
 
@@ -571,7 +540,6 @@ func TestHandleProxyStripsVersionPrefixWhenBackendHasV1(t *testing.T) {
 	svc := &Server{
 		cfg: config.Config{
 			ListenAddr:          ":0",
-			AllowDynamicBackend: true,
 			DataDir:             dataDir,
 			RetentionDays:       14,
 			MaxRequestBytes:     2 << 20,
@@ -589,7 +557,7 @@ func TestHandleProxyStripsVersionPrefixWhenBackendHasV1(t *testing.T) {
 	defer proxy.Close()
 
 	resp, err := proxy.Client().Post(proxy.URL+"/v1/chat/completions", "application/json",
-		strings.NewReader(`{"model":"m","messages":[]}`))
+		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
 	if err != nil {
 		t.Fatalf("proxy post: %v", err)
 	}
@@ -624,17 +592,14 @@ func TestBuildProxyPath(t *testing.T) {
 	}
 }
 
-// doGoClawProxy 经代理发起一次 chat 请求；ua 指定 User-Agent，override 指定 X-Backend-URL。
-func doGoClawProxy(t *testing.T, proxyURL, ua, override string) int {
+// doGoClawProxy 经代理发起一次 chat 请求；ua 指定 User-Agent。
+func doGoClawProxy(t *testing.T, proxyURL, ua string) int {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, proxyURL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"x","messages":[]}`))
+		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
-	}
-	if override != "" {
-		req.Header.Set("X-Backend-URL", override)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -644,86 +609,75 @@ func doGoClawProxy(t *testing.T, proxyURL, ua, override string) int {
 	return resp.StatusCode
 }
 
-// TestGoClawToolCallRouting 验证 GoClaw（User-Agent 含 "GoClaw"，忽略大小写）
-// 只路由到 tool_call: true 的后端，且动态覆盖对其不生效。
+// TestGoClawToolCallRouting 验证配置了 User-Agent 规则后：GoClaw 请求
+// 只路由到带 tool_call 标签的后端；UA 不包含配置子串时不命中规则。
 func TestGoClawToolCallRouting(t *testing.T) {
 	tagged, taggedRec := newRecordingBackend()
 	plain, plainRec := newRecordingBackend()
 	defer tagged.Close()
 	defer plain.Close()
 
-	dataDir := t.TempDir()
-	sqlCfg := config.DatabaseConfig{Type: "sqlite", SQLite: config.SQLiteConfig{Path: "proxy.db"}}
-	database, err := db.NewDatabase(sqlCfg, dataDir, "debug")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	if err := db.InitDB(database, "sqlite"); err != nil {
-		t.Fatalf("init db: %v", err)
-	}
-	st := store.New(database, dataDir, 14)
-	st.Active = func() int64 { return 0 }
-
 	backends := []config.BackendConfig{
-		{Name: "tagged", URL: tagged.URL, Weight: 1, ToolCall: true},
+		{Name: "tagged", URL: tagged.URL, Weight: 1, Tags: []string{"tool_call"}},
 		{Name: "plain", URL: plain.URL, Weight: 1},
 	}
-	svc := &Server{
-		cfg:      config.Config{AllowDynamicBackend: true, RecordPaths: []string{"/v1/chat/completions"}},
-		store:    st,
-		balancer: balancer.New(backends, "rr"),
-		client:   &http.Client{Timeout: 10 * time.Second},
-		hub:      events.New(),
-	}
+	routing := &config.RoutingConfig{Rules: []config.RoutingRule{{
+		Name:   "goclaw",
+		Header: map[string]string{"User-Agent": "GoClaw/2.1"},
+		Pool:   "tool_call",
+	}}}
+	svc, cleanup := newRoutingTestServer(t, backends, routing)
+	defer cleanup()
 	proxy := httptest.NewServer(svc)
 	defer proxy.Close()
 
-	// GoClaw（任意大小写）→ 只命中 tagged
-	for i := 0; i < 5; i++ {
-		if code := doGoClawProxy(t, proxy.URL, "GoClaw/2.1 (Linux)", ""); code != http.StatusOK {
+	// UA 包含 GoClaw/2.1 → 命中规则 → 只去 tagged
+	for i := 0; i < 6; i++ {
+		if code := doGoClawProxy(t, proxy.URL, "GoClaw/2.1"); code != http.StatusOK {
 			t.Fatalf("GoClaw request #%d status=%d, want 200", i, code)
 		}
 	}
-	if code := doGoClawProxy(t, proxy.URL, "goCLAW/1.0", ""); code != http.StatusOK {
-		t.Fatalf("mixed-case GoClaw request status=%d, want 200", code)
+	// UA 不包含 GoClaw/2.1 → 不命中规则，走全量池
+	if code := doGoClawProxy(t, proxy.URL, "GoClaw/2.2"); code != http.StatusOK {
+		t.Fatalf("non-matching UA request status=%d, want 200", code)
 	}
-	// 动态覆盖对 GoClaw 不生效：即使 X-Backend-URL 指向 plain，仍去 tagged
-	if code := doGoClawProxy(t, proxy.URL, "GoClaw/2.1", plain.URL); code != http.StatusOK {
-		t.Fatalf("GoClaw with override status=%d, want 200", code)
-	}
-
 	// 普通 UA：全量池 rr，两个后端各一半
-	for i := 0; i < 4; i++ {
-		if code := doGoClawProxy(t, proxy.URL, "curl/8.5", ""); code != http.StatusOK {
+	for i := 0; i < 3; i++ {
+		if code := doGoClawProxy(t, proxy.URL, "curl/8.5"); code != http.StatusOK {
 			t.Fatalf("normal request #%d status=%d, want 200", i, code)
 		}
 	}
 
 	tc, _ := taggedRec.snapshot()
 	pc, _ := plainRec.snapshot()
-	// GoClaw 共 7 个（5+1 常规 + 1 带覆盖），全部命中 tagged；
-	// 普通流量 4 个走全量池 {tagged, plain}，rr 各半（tagged 2 / plain 2）。
-	// 若 GoClaw 泄漏到 plain，pc 会大于 2。
-	if tc != 9 {
-		t.Fatalf("tagged received=%d, want 9 (7 GoClaw + 2 normal rr share)", tc)
+	// GoClaw/2.1 共 6 个，全部命中 tagged；
+	// 普通流量 4 个（UA 不匹配 1 + curl 3）走全量池 {tagged, plain}，rr 各半（tagged 2 / plain 2）。
+	// 若 GoClaw/2.1 泄漏到 plain，pc 会大于 2。
+	if tc != 8 {
+		t.Fatalf("tagged received=%d, want 8 (6 GoClaw + 2 normal rr share)", tc)
 	}
 	if pc != 2 {
 		t.Fatalf("plain received=%d, want 2 (only normal rr share, no GoClaw)", pc)
 	}
 }
 
-// TestGoClawNoToolCallBackend 验证池中没有任何 tool_call 后端时，GoClaw 请求返回 400。
+// TestGoClawNoToolCallBackend 验证命中规则但池中没有任何 tool_call 后端时，请求返回 400。
 func TestGoClawNoToolCallBackend(t *testing.T) {
 	backend, _ := newRecordingBackend()
 	defer backend.Close()
-	svc, _, cleanup := newTestServer(t, backend.URL)
+	routing := &config.RoutingConfig{Rules: []config.RoutingRule{{
+		Name:   "goclaw",
+		Header: map[string]string{"User-Agent": "GoClaw/2.1"},
+		Pool:   "tool_call",
+	}}}
+	svc, cleanup := newRoutingTestServer(t, []config.BackendConfig{{Name: "b", URL: backend.URL, Weight: 1}}, routing)
 	defer cleanup()
 
 	proxy := httptest.NewServer(svc)
 	defer proxy.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"x","messages":[]}`))
+		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "GoClaw/2.1")
 	resp, err := http.DefaultClient.Do(req)
@@ -756,7 +710,7 @@ func newRoutingTestServer(t *testing.T, backends []config.BackendConfig, routing
 	st.Active = func() int64 { return 0 }
 
 	svc := &Server{
-		cfg:      config.Config{AllowDynamicBackend: true, RecordPaths: []string{"/v1/chat/completions"}},
+		cfg:      config.Config{RecordPaths: []string{"/v1/chat/completions"}},
 		yamlCfg:  &config.YAMLConfig{Routing: routing},
 		store:    st,
 		balancer: balancer.New(backends, "rr"),
@@ -770,7 +724,7 @@ func newRoutingTestServer(t *testing.T, backends []config.BackendConfig, routing
 func doRoutingProxy(t *testing.T, proxyURL, ua string, headers map[string]string, want int) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, proxyURL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"x","messages":[]}`))
+		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
@@ -789,7 +743,7 @@ func doRoutingProxy(t *testing.T, proxyURL, ua string, headers map[string]string
 }
 
 // TestRoutingRulesConfigured 验证配置 routing.rules 后：请求按配置顺序命中首条规则，
-// 只从规则 pool 标签子池选点；match 多条件 AND；动态覆盖对命中规则的请求不生效。
+// 只从规则 pool 标签子池选点；header 多条件 AND；动态覆盖对命中规则的请求不生效。
 func TestRoutingRulesConfigured(t *testing.T) {
 	fast, fastRec := newRecordingBackend()
 	tagged, taggedRec := newRecordingBackend()
@@ -800,19 +754,19 @@ func TestRoutingRulesConfigured(t *testing.T) {
 
 	backends := []config.BackendConfig{
 		{Name: "fast", URL: fast.URL, Weight: 1, Tags: []string{"fast"}},
-		{Name: "tagged", URL: tagged.URL, Weight: 1, ToolCall: true},
+		{Name: "tagged", URL: tagged.URL, Weight: 1, Tags: []string{"tool_call"}},
 		{Name: "plain", URL: plain.URL, Weight: 1},
 	}
 	routing := &config.RoutingConfig{Rules: []config.RoutingRule{
 		{
-			Name:  "agentx-fast",
-			Match: config.RuleMatch{UserAgentContains: "AgentX", Headers: map[string]string{"X-Agent-Env": "prod"}},
-			Pool:  "fast",
+			Name:   "agentx-fast",
+			Header: map[string]string{"User-Agent": "AgentX/1.0", "X-Agent-Env": "prod"},
+			Pool:   "fast",
 		},
 		{
-			Name:  "agentx-tool",
-			Match: config.RuleMatch{UserAgentContains: "AgentX"},
-			Pool:  "tool_call",
+			Name:   "agentx-tool",
+			Header: map[string]string{"User-Agent": "AgentX/1.0"},
+			Pool:   "tool_call",
 		},
 	}}
 	svc, cleanup := newRoutingTestServer(t, backends, routing)
@@ -820,24 +774,22 @@ func TestRoutingRulesConfigured(t *testing.T) {
 	proxy := httptest.NewServer(svc)
 	defer proxy.Close()
 
-	// UA AgentX + header prod → 规则 1（fast 子池）
+	// UA AgentX/1.0 + header prod → 规则 1（fast 子池）
 	doRoutingProxy(t, proxy.URL, "AgentX/1.0", map[string]string{"X-Agent-Env": "prod"}, http.StatusOK)
-	// UA AgentX + header 值不对 → 规则 1 不中（AND），命中规则 2（tool_call 子池）
+	// UA AgentX/1.0 + header 值不对 → 规则 1 不中（AND），命中规则 2（tool_call 子池）
 	doRoutingProxy(t, proxy.URL, "AgentX/1.0", map[string]string{"X-Agent-Env": "dev"}, http.StatusOK)
-	// UA AgentX 无 header → 规则 2（tool_call 子池）
+	// UA AgentX/1.0 无 header → 规则 2（tool_call 子池）
 	doRoutingProxy(t, proxy.URL, "AgentX/1.0", nil, http.StatusOK)
-	// UA AgentX + prod + 动态覆盖 → 仍命中规则 1，覆盖被忽略
-	doRoutingProxy(t, proxy.URL, "AgentX/1.0", map[string]string{"X-Agent-Env": "prod", "X-Backend-URL": plain.URL}, http.StatusOK)
-	// 普通 UA → 无规则命中，走全量池
-	doRoutingProxy(t, proxy.URL, "curl/8.5", nil, http.StatusOK)
+	// UA 不包含 AgentX/1.0 → 无规则命中，走全量池
+	doRoutingProxy(t, proxy.URL, "AgentX/1.1", nil, http.StatusOK)
 
 	fc, _ := fastRec.snapshot()
 	tc, _ := taggedRec.snapshot()
 	pc, _ := plainRec.snapshot()
-	// 规则 1 的 2 个请求必须都落在 fast（fc≥2），规则 2 的 2 个必须都落在 tagged（tc≥2）；
+	// 规则 1 的 1 个请求必须落在 fast（fc≥1），规则 2 的 2 个必须都落在 tagged（tc≥2）；
 	// plain 只可能收到全量池那 1 个正常请求的份额（pc≤1）——若规则流量泄漏到 plain，pc 会大于 1。
-	if fc < 2 {
-		t.Fatalf("fast received=%d, want >=2 (all rule 1 traffic)", fc)
+	if fc < 1 {
+		t.Fatalf("fast received=%d, want >=1 (all rule 1 traffic)", fc)
 	}
 	if tc < 2 {
 		t.Fatalf("tagged received=%d, want >=2 (all rule 2 traffic)", tc)
@@ -847,14 +799,55 @@ func TestRoutingRulesConfigured(t *testing.T) {
 	}
 }
 
+// TestRoutingRuleUAContainsMatch 验证路由规则 User-Agent 采用不区分大小写的子串包含匹配
+// （配置 "GoClaw" 可命中 "GoClaw/2.1 (Windows NT 10.0)"），其余请求头保持精确匹配。
+func TestRoutingRuleUAContainsMatch(t *testing.T) {
+	tagged, taggedRec := newRecordingBackend()
+	plain, plainRec := newRecordingBackend()
+	defer tagged.Close()
+	defer plain.Close()
+
+	backends := []config.BackendConfig{
+		{Name: "tagged", URL: tagged.URL, Weight: 1, Tags: []string{"tool_call"}},
+		{Name: "plain", URL: plain.URL, Weight: 1},
+	}
+	routing := &config.RoutingConfig{Rules: []config.RoutingRule{{
+		Name:   "goclaw",
+		Header: map[string]string{"User-Agent": "GoClaw", "X-Agent-Env": "prod"},
+		Pool:   "tool_call",
+	}}}
+	svc, cleanup := newRoutingTestServer(t, backends, routing)
+	defer cleanup()
+	proxy := httptest.NewServer(svc)
+	defer proxy.Close()
+
+	// UA 包含子串（带版本/平台后缀、大小写不同）+ 请求头精确匹配 → 命中规则。
+	doRoutingProxy(t, proxy.URL, "GoClaw/2.1 (Windows NT 10.0; Win64)", map[string]string{"X-Agent-Env": "prod"}, http.StatusOK)
+	doRoutingProxy(t, proxy.URL, "goclaw/3.0", map[string]string{"X-Agent-Env": "prod"}, http.StatusOK)
+	// UA 包含但请求头不精确 → 不命中（AND）。
+	doRoutingProxy(t, proxy.URL, "GoClaw/2.1", map[string]string{"X-Agent-Env": "dev"}, http.StatusOK)
+	// UA 不包含 → 不命中。
+	doRoutingProxy(t, proxy.URL, "curl/8.5", map[string]string{"X-Agent-Env": "prod"}, http.StatusOK)
+
+	tc, _ := taggedRec.snapshot()
+	pc, _ := plainRec.snapshot()
+	// 命中的 2 个请求必须落在 tagged；未命中的 2 个走全量池（tagged+plain rr 各一半）。
+	if tc < 2 {
+		t.Fatalf("tagged received=%d, want >=2 (all rule traffic)", tc)
+	}
+	if pc != 1 {
+		t.Fatalf("plain received=%d, want 1 (full-pool share of non-matched traffic)", pc)
+	}
+}
+
 // TestRoutingRuleEmptyPool 验证规则命中但 pool 无后端时返回 400，未命中规则的流量不受影响。
 func TestRoutingRuleEmptyPool(t *testing.T) {
 	backend, _ := newRecordingBackend()
 	defer backend.Close()
 	routing := &config.RoutingConfig{Rules: []config.RoutingRule{{
-		Name:  "ghost",
-		Match: config.RuleMatch{UserAgentContains: "Ghost"},
-		Pool:  "ghost-pool",
+		Name:   "ghost",
+		Header: map[string]string{"User-Agent": "Ghost/1.0"},
+		Pool:   "ghost-pool",
 	}}}
 	svc, cleanup := newRoutingTestServer(t, []config.BackendConfig{{Name: "b", URL: backend.URL, Weight: 1}}, routing)
 	defer cleanup()
@@ -862,7 +855,7 @@ func TestRoutingRuleEmptyPool(t *testing.T) {
 	defer proxy.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"x","messages":[]}`))
+		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Ghost/1.0")
 	resp, err := http.DefaultClient.Do(req)
@@ -879,7 +872,7 @@ func TestRoutingRuleEmptyPool(t *testing.T) {
 	}
 
 	// 未命中规则的流量不受影响
-	if code := doGoClawProxy(t, proxy.URL, "curl/8.5", ""); code != http.StatusOK {
+	if code := doGoClawProxy(t, proxy.URL, "curl/8.5"); code != http.StatusOK {
 		t.Fatalf("normal request status=%d, want 200", code)
 	}
 }
@@ -928,7 +921,7 @@ func waitForRecords(t *testing.T, svc *Server, n int, wantStatus int) []model.Re
 func postCompletion(t *testing.T, proxyURL string, extraHeaders map[string]string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, proxyURL+"/v1/completions",
-		strings.NewReader(`{"model":"m","prompt":"hi"}`))
+		strings.NewReader(`{"model":"llm_prox","prompt":"hi"}`))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -1130,26 +1123,37 @@ func TestHandleProxyFailoverExhausted(t *testing.T) {
 	}
 }
 
-// TestGoClawFailoverStaysInToolCallPool 验证 GoClaw 故障转移只在 tool_call 子池内
-// 转移，不会落到普通后端。
+// TestGoClawFailoverStaysInToolCallPool 验证命中 tool_call 规则后故障转移只在
+// tool_call 子池内转移，不会落到普通后端。
 func TestGoClawFailoverStaysInToolCallPool(t *testing.T) {
 	tc2 := okJSONBackend(t, `{"model":"tc2-model","content":"ok"}`)
 	defer tc2.Close()
 	plain := okJSONBackend(t, `{"model":"plain-model","content":"ok"}`)
 	defer plain.Close()
 
-	svc, _, cleanup := newTestServer(t, tc2.URL)
-	defer cleanup()
-	svc.balancer = balancer.New([]config.BackendConfig{
+	routing := &config.RoutingConfig{Rules: []config.RoutingRule{{
+		Name:   "goclaw",
+		Header: map[string]string{"User-Agent": "GoClaw/2.1"},
+		Pool:   "tool_call",
+	}}}
+	svc, cleanup := newRoutingTestServer(t, []config.BackendConfig{
 		{Name: "plain", URL: plain.URL, Weight: 1},
-		{Name: "tc-1", URL: deadBackendURL(t), Weight: 1, ToolCall: true},
-		{Name: "tc-2", URL: tc2.URL, Weight: 1, ToolCall: true},
-	}, "rr")
+		{Name: "tc-1", URL: deadBackendURL(t), Weight: 1, Tags: []string{"tool_call"}},
+		{Name: "tc-2", URL: tc2.URL, Weight: 1, Tags: []string{"tool_call"}},
+	}, routing)
+	defer cleanup()
 
 	proxy := httptest.NewServer(svc)
 	defer proxy.Close()
 
-	resp := postCompletion(t, proxy.URL, map[string]string{"User-Agent": "GoClaw/2.1"})
+	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "GoClaw/2.1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy do: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want 200 after failover within tool_call pool", resp.StatusCode)

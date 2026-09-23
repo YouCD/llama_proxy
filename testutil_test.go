@@ -43,7 +43,6 @@ func newTestServer(t *testing.T, backendURL string) (*Server, db.Database, func(
 	svc := &Server{
 		cfg: config.Config{
 			ListenAddr:          ":0",
-			AllowDynamicBackend: true,
 			DataDir:             dataDir,
 			RetentionDays:       14,
 			MaxRequestBytes:     2 << 20,

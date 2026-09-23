@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/textproto"
 	"strings"
 	"time"
 
@@ -42,17 +43,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	clientIP := httpx.ClientIP(r)
 	// 创建带 request_id 的请求上下文，日志可按 request_id 串联整个请求生命周期。
 	ctx := s.newInflightCtx(r.Context(), requestID)
-	firstCand, trimmedQuery, nextBackend, err := s.selectBackend(w, r, ctx)
-	if err != nil {
-		httpx.WriteJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
-		return
-	}
 
 	if s.cfg.MaxRequestBytes > 0 && r.ContentLength > s.cfg.MaxRequestBytes {
 		httpx.WriteJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "request is too large"})
 		return
 	}
 
+	// 先读请求体并识别模型 ID，再按模型 ID 选择转发后端：
+	// llm_prox（或空）→ 轮询模型列表；具体模型 ID → 直连对应后端/本地进程。
 	originalBody, err := httpx.ReadWithLimit(r.Body, s.cfg.MaxRequestBytes)
 	if err != nil {
 		code := http.StatusBadRequest
@@ -64,12 +62,25 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isStreaming, detectedModel := meta.DetectRequestMeta(originalBody)
+	// 请求到达即打印（selectBackend 可能阻塞等待模型加载/切换，不能等转发前才打，
+	// 否则"谁在什么时间触发了模型切换"无法从日志追溯）。
+	log.WithCtx(ctx).Infof("request received: id=%s method=%s path=%s client=%s model=%s stream=%v ua=%q",
+		requestID, r.Method, r.URL.Path, clientIP, detectedModel, isStreaming, r.UserAgent())
+	firstCand, trimmedQuery, nextBackend, err := s.selectBackend(w, r, ctx, detectedModel)
+	if err != nil {
+		code := http.StatusBadRequest
+		if se, ok := err.(*statusError); ok {
+			code = se.code
+		}
+		httpx.WriteJSON(w, code, map[string]any{"error": err.Error(), "request_id": requestID})
+		return
+	}
 
 	s.active.Add(1)
-	s.hub.Broadcast(map[string]any{"kind": "active", "active_connections": s.active.Load(), "time": time.Now().UTC()})
+	s.hub.BroadcastWithType("active", map[string]any{"active_connections": s.active.Load(), "time": time.Now().UTC()})
 	defer func() {
 		s.active.Add(-1)
-		s.hub.Broadcast(map[string]any{"kind": "active", "active_connections": s.active.Load(), "time": time.Now().UTC()})
+		s.hub.BroadcastWithType("active", map[string]any{"active_connections": s.active.Load(), "time": time.Now().UTC()})
 	}()
 
 	// 转发请求：当前后端失败（连接错误，或响应体写出前返回非 200 状态码）时自动尝试
@@ -94,8 +105,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				reqModel = newModel
 			}
 		}
-		log.WithCtx(ctx).Infof("request received: id=%s method=%s path=%s client=%s backend=%s model=%s stream=%v",
-			requestID, r.Method, r.URL.Path, clientIP, cand.url, reqModel, isStreaming)
+		log.WithCtx(ctx).Infof("forwarding request: id=%s backend=%s model=%s stream=%v",
+			requestID, cand.url, reqModel, isStreaming)
 
 		target := cand.url + buildProxyPath(cand.url, r.URL.Path)
 		if trimmedQuery != "" {
@@ -238,8 +249,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		log.WithCtx(ctx).Infof("finish request failed: %v", err)
 	}
 
-	s.hub.Broadcast(map[string]any{
-		"kind":                 "request",
+	s.hub.BroadcastWithType("request", map[string]any{
 		"id":                   requestID,
 		"time":                 time.Now().UTC(),
 		"path":                 r.URL.Path,
@@ -298,115 +308,124 @@ func buildProxyPath(backendURL, path string) string {
 	return path
 }
 
-// routeRule 描述一条生效的路由规则（来自配置或内置回退）。
+// routeRule 描述一条生效的路由规则（来自 routing.rules 配置）。
 type routeRule struct {
-	name  string
-	match config.RuleMatch
-	pool  string
+	name   string
+	header map[string]string
+	pool   string
 }
 
-// effectiveRoutingRules 返回生效的路由规则：配置了 routing.rules 时以配置为准；
-// 未配置时回退到内置规则（User-Agent 含 "GoClaw" → tool_call 池），保持既有行为。
+// effectiveRoutingRules 返回生效的路由规则（来自 routing.rules 配置）；
+// 未配置 routing 时返回空切片（无规则，全部流量走默认池）。
 func (s *Server) effectiveRoutingRules() []routeRule {
-	if s.yamlCfg != nil && s.yamlCfg.Routing != nil && len(s.yamlCfg.Routing.Rules) > 0 {
-		rules := make([]routeRule, 0, len(s.yamlCfg.Routing.Rules))
-		for i := range s.yamlCfg.Routing.Rules {
-			rr := &s.yamlCfg.Routing.Rules[i]
-			name := strings.TrimSpace(rr.Name)
-			if name == "" {
-				name = fmt.Sprintf("rule-%d", i+1)
-			}
-			rules = append(rules, routeRule{
-				name:  name,
-				match: rr.Match,
-				pool:  strings.TrimSpace(rr.Pool),
-			})
-		}
-		return rules
+	if s.yamlCfg == nil || s.yamlCfg.Routing == nil || len(s.yamlCfg.Routing.Rules) == 0 {
+		return nil
 	}
-	return []routeRule{{
-		name:  "goclaw(builtin)",
-		match: config.RuleMatch{UserAgentContains: "GoClaw"},
-		pool:  "tool_call",
-	}}
+	rules := make([]routeRule, 0, len(s.yamlCfg.Routing.Rules))
+	for i := range s.yamlCfg.Routing.Rules {
+		rr := &s.yamlCfg.Routing.Rules[i]
+		name := strings.TrimSpace(rr.Name)
+		if name == "" {
+			name = fmt.Sprintf("rule-%d", i+1)
+		}
+		rules = append(rules, routeRule{
+			name:   name,
+			header: rr.Header,
+			pool:   strings.TrimSpace(rr.Pool),
+		})
+	}
+	return rules
 }
 
-// matchRoutingRule 按配置顺序返回首条命中的路由规则；无规则命中时返回 nil。
+// matchRoutingRule 按配置顺序返回首条命中的路由规则；无规则或未命中时返回 nil。
 func (s *Server) matchRoutingRule(r *http.Request) *routeRule {
 	rules := s.effectiveRoutingRules()
 	for i := range rules {
-		if ruleMatches(r, rules[i].match) {
+		if ruleMatches(r, rules[i].header) {
 			return &rules[i]
 		}
 	}
 	return nil
 }
 
-// ruleMatches 判定请求是否命中规则的 match 条件：各条件 AND；header 内部任一请求头
-// 匹配即视为该条件命中。
-func ruleMatches(r *http.Request, m config.RuleMatch) bool {
-	if m.UserAgentContains == "" && len(m.Headers) == 0 {
+// ruleMatches 判定请求是否命中规则的 header 条件：map 内所有请求头必须同时满足
+// （AND）。头名按规范化后的形式比较（Go 服务端把收到的头名规范化为标准形式，例如
+// X-LLM-Purpose 会存为 X-Llm-Purpose，客户端原始大小写不可观测，因此配置头名写
+// user-agent 或 X-Agent-Env 都等价于标准形式）；头值匹配规则：User-Agent 采用
+// 包含匹配（不区分大小写的子串包含），其余请求头 trim 后精确相等、区分大小写；
+// 头缺失或为空视为不满足。
+func ruleMatches(r *http.Request, h map[string]string) bool {
+	if len(h) == 0 {
 		return false
 	}
-	if m.UserAgentContains != "" &&
-		!strings.Contains(strings.ToLower(r.UserAgent()), strings.ToLower(m.UserAgentContains)) {
-		return false
-	}
-	if len(m.Headers) > 0 {
-		matched := false
-		for name, want := range m.Headers {
-			if v := strings.TrimSpace(r.Header.Get(name)); v != "" && v == want {
-				matched = true
-				break
-			}
+	for name, want := range h {
+		key := textproto.CanonicalMIMEHeaderKey(name)
+		vals, ok := r.Header[key]
+		if !ok {
+			return false
 		}
-		if !matched {
+		v := strings.TrimSpace(vals[0])
+		if v == "" {
+			return false
+		}
+		if key == "User-Agent" {
+			// User-Agent 采用包含匹配（不区分大小写）：完整 UA 串很长且常带版本/平台后缀，
+			// 精确相等难以维护；配置 "GoClaw" 即可命中 "GoClaw/2.1 (Windows)"。
+			if !strings.Contains(strings.ToLower(v), strings.ToLower(want)) {
+				return false
+			}
+			continue
+		}
+		if v != want {
 			return false
 		}
 	}
 	return true
 }
 
-// selectBackend 选择本次请求的转发后端，返回首个转发候选与故障转移函数。启用进程调度时：
-//   - 开发(coding)流量：走本地 coding 进程（未就绪则 pending 等待，超时返回错误），并续期租约；
-//     单后端，不可故障转移；
-//   - 命中 routing 规则（或内置 GoClaw 规则）的请求：只从规则 pool 标签对应的后端子池
-//     （含本地 background 节点）选择，动态覆盖（X-Backend-URL / ?backend=）不生效；请求失败
-//     时自动转移到子池内下一个未尝试的后端；
-//   - 其余流量：统一落入下方代理池（backends.list + 本地 background 节点）。本地 background
-//     节点随就绪状态动态入池/出池，见 syncLocalBackendNode。请求失败时自动转移到池内下一个
-//     未尝试的后端。
-//
-// 动态指定后端（X-Backend-URL / ?backend=）与调度单后端路径没有故障转移目标。
-// 未启用调度时退化为纯负载均衡逻辑。
-func (s *Server) selectBackend(w http.ResponseWriter, r *http.Request, ctx context.Context) (*backendCandidate, string, func(map[string]bool) *backendCandidate, error) {
-	vals := r.URL.Query()
+// ProxyModelID 是代理对外暴露的占位模型 ID：客户端请求该 ID（或省略 model 字段）时
+// 按策略轮询模型列表（backends.list + 本地 background 节点）；请求具体模型 ID 时
+// 直连部署该模型的后端/本地进程。
+const ProxyModelID = "llm_prox"
 
-	if s.scheduler != nil && s.scheduler.CodingHeaderMatch(r.Header) {
-		s.scheduler.TouchCoding()
-		s.pushSchedEvent("coding_request", map[string]any{"method": r.Method, "path": r.URL.Path})
-		ready, rerr := s.scheduler.EnsureCoding(ctx)
-		if rerr != nil {
-			return nil, "", nil, rerr
+// statusError 携带期望的 HTTP 状态码（selectBackend 的默认错误按 400 返回）。
+type statusError struct {
+	code int
+	msg  string
+}
+
+func (e *statusError) Error() string { return e.msg }
+
+func statusErrf(code int, format string, args ...any) error {
+	return &statusError{code: code, msg: fmt.Sprintf(format, args...)}
+}
+
+// selectBackend 选择本次请求的转发后端，返回首个转发候选与故障转移函数。
+// 按请求体中的模型 ID 分派：
+//
+//   - 模型 ID 为 llm_prox（或空）：默认轮询模型列表——命中 routing 规则（若配置）时
+//     只从规则 pool 标签对应的后端子池（含本地 background 节点）选择；其余流量统一
+//     落入全量代理池（backends.list + 本地 background 节点，本地节点随就绪状态动态
+//     入池/出池，见 syncLocalBackendNode）。请求失败时自动转移到池内下一个未尝试的
+//     后端；
+//   - 模型 ID 为具体名称：直连部署该模型的后端（backends.list）或本地调度进程
+//     （coding/background，未就绪则启动并等待，并续期租约），单后端、不可故障转移；
+//     未找到部署该模型的后端/进程时返回 400。
+func (s *Server) selectBackend(w http.ResponseWriter, r *http.Request, ctx context.Context, reqModel string) (*backendCandidate, string, func(map[string]bool) *backendCandidate, error) {
+	// 具体模型 ID：直连对应后端/本地进程（不使用 routing 规则）。
+	if reqModel != "" && reqModel != ProxyModelID {
+		cand, err := s.selectSpecificBackend(r, ctx, reqModel)
+		if err != nil {
+			return nil, r.URL.RawQuery, nil, err
 		}
-		select {
-		case <-ready:
-		case <-ctx.Done():
-			return nil, "", nil, fmt.Errorf("timed out waiting for coding model ready")
-		}
-		base := s.scheduler.ActiveBaseURL()
-		if base == "" {
-			return nil, "", nil, fmt.Errorf("coding model not ready")
-		}
-		s.scheduler.TouchCoding()
-		return &backendCandidate{url: strings.TrimRight(base, "/"), cfg: s.schedulerForwardBC()}, vals.Encode(), noFailover, nil
+		return cand, r.URL.RawQuery, noFailover, nil
 	}
 
 	var first *backendCandidate
 	var nextFn func(map[string]bool) *backendCandidate
 
 	if rule := s.matchRoutingRule(r); rule != nil {
-		// 命中路由规则：只从 pool 标签子池选点（含本地 background 节点），动态覆盖不生效。
+		// 命中路由规则：只从 pool 标签子池选点（含本地 background 节点）。
 		// 请求失败时自动转移到子池内下一个未尝试的后端。
 		if s.balancer != nil {
 			if b := s.balancer.SelectFromTag(rule.pool); b != nil {
@@ -423,18 +442,6 @@ func (s *Server) selectBackend(w http.ResponseWriter, r *http.Request, ctx conte
 		if first == nil {
 			return nil, "", nil, fmt.Errorf("routing rule %q matched but pool %q has no available backend", rule.name, rule.pool)
 		}
-	} else if s.cfg.AllowDynamicBackend {
-		if b := strings.TrimSpace(r.Header.Get("X-Backend-URL")); b != "" {
-			first = &backendCandidate{url: strings.TrimRight(b, "/")}
-		} else if b := strings.TrimSpace(vals.Get("backend")); b != "" {
-			vals.Del("backend")
-			first = &backendCandidate{url: strings.TrimRight(b, "/")}
-		} else if s.balancer != nil {
-			if b := s.balancer.Select(); b != nil {
-				first = candidateOf(b)
-				nextFn = s.nextBalancerCandidate
-			}
-		}
 	} else if s.balancer != nil {
 		if b := s.balancer.Select(); b != nil {
 			first = candidateOf(b)
@@ -443,7 +450,7 @@ func (s *Server) selectBackend(w http.ResponseWriter, r *http.Request, ctx conte
 	}
 
 	if first == nil {
-		return nil, "", nil, fmt.Errorf("no backend selected: configure backends.list or provide a dynamic backend override")
+		return nil, "", nil, fmt.Errorf("no backend selected: configure backends.list")
 	}
 
 	if err := config.ValidateBackendURL(first.url); err != nil {
@@ -452,7 +459,75 @@ func (s *Server) selectBackend(w http.ResponseWriter, r *http.Request, ctx conte
 	if nextFn == nil {
 		nextFn = noFailover
 	}
-	return first, vals.Encode(), nextFn, nil
+	return first, r.URL.RawQuery, nextFn, nil
+}
+
+// selectSpecificBackend 按具体模型 ID 直连部署该模型的目标：
+//  1. 本地 coding 进程（请求其固化模型 ID 时启动/切换并等待就绪，同时续期开发租约）；
+//  2. 代理池内声明该模型的后端（backends.list 与就绪的本地 background 节点，
+//     经 GetBackendByModel 反查，模型 ID 唯一性由启动时校验保证）；
+//  3. 未就绪的本地 background 进程（启动并等待就绪；coding 租约仍活跃时进程被占用，
+//     返回 503）。
+func (s *Server) selectSpecificBackend(r *http.Request, ctx context.Context, reqModel string) (*backendCandidate, error) {
+	sc := s.schedulingConfig()
+	if sc != nil && reqModel == sc.Coding.Model {
+		return s.selectCodingBackend(ctx, reqModel)
+	}
+	if s.balancer != nil {
+		if b := s.balancer.GetBackendByModel(reqModel); b != nil {
+			return candidateOf(b), nil
+		}
+	}
+	if sc != nil && reqModel == sc.Background.Model && s.scheduler != nil {
+		if s.scheduler.IsCodingActive() {
+			return nil, statusErrf(http.StatusServiceUnavailable,
+				"model %q not ready: coding model is active (lease), retry later", reqModel)
+		}
+		ready, rerr := s.scheduler.EnsureBackground(ctx)
+		if rerr != nil {
+			return nil, rerr
+		}
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("timed out waiting for background model ready")
+		}
+		base := s.scheduler.ActiveBaseURL()
+		if base == "" {
+			return nil, fmt.Errorf("background model not ready")
+		}
+		return &backendCandidate{url: strings.TrimRight(base, "/"), cfg: s.schedulerForwardBC()}, nil
+	}
+	return nil, fmt.Errorf("unknown model %q: use %q for load-balanced routing or one of the configured model ids", reqModel, ProxyModelID)
+}
+
+// selectCodingBackend 把请求路由到本地 coding 进程：未就绪则启动并等待，同时续期租约。
+func (s *Server) selectCodingBackend(ctx context.Context, reqModel string) (*backendCandidate, error) {
+	s.scheduler.TouchCoding()
+	s.pushSchedEvent("coding_request", map[string]any{"model": reqModel})
+	ready, rerr := s.scheduler.EnsureCoding(ctx)
+	if rerr != nil {
+		return nil, rerr
+	}
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		return nil, fmt.Errorf("timed out waiting for coding model ready")
+	}
+	base := s.scheduler.ActiveBaseURL()
+	if base == "" {
+		return nil, fmt.Errorf("coding model not ready")
+	}
+	s.scheduler.TouchCoding()
+	return &backendCandidate{url: strings.TrimRight(base, "/"), cfg: s.schedulerForwardBC()}, nil
+}
+
+// schedulingConfig 返回调度配置（未启用调度时为 nil）。
+func (s *Server) schedulingConfig() *config.SchedulingConfig {
+	if s.yamlCfg == nil || s.yamlCfg.Scheduling == nil {
+		return nil
+	}
+	return s.yamlCfg.Scheduling
 }
 
 // backendCandidate 是单个转发目标（后端地址及其配置；动态指定后端时 cfg 为 nil）。

@@ -11,19 +11,18 @@ import (
 )
 
 type Config struct {
-	ListenAddr          string
-	AllowDynamicBackend bool
-	DataDir             string
-	RetentionDays       int
-	MaxRequestBytes     int64
-	MaxCaptureBytes     int64
-	RequestTimeout      time.Duration
-	PollBackendMetrics  bool
-	PollInterval        time.Duration
-	RecordPaths         []string
-	APIKey              string   // 客户端访问 proxy 的 API Key，空值则不鉴权
-	UIAllowedHosts      []string // 允许访问 /_proxy/ui 的 Host 白名单，空则不限制
-	LogLevel            string
+	ListenAddr         string
+	DataDir            string
+	RetentionDays      int
+	MaxRequestBytes    int64
+	MaxCaptureBytes    int64
+	RequestTimeout     time.Duration
+	PollBackendMetrics bool
+	PollInterval       time.Duration
+	RecordPaths        []string
+	APIKey             string   // 客户端访问 proxy 的 API Key，空值则不鉴权
+	UIAllowedHosts     []string // 允许访问 /_proxy/ui 的 Host 白名单，空则不限制
+	LogLevel           string
 }
 
 type YAMLConfig struct {
@@ -36,30 +35,22 @@ type YAMLConfig struct {
 }
 
 // RoutingConfig 描述按客户端特征路由到指定标签池的规则表。
-// 规则按配置顺序评估，首条命中的规则生效；未配置时代理回退到内置的 GoClaw 规则
-// （User-Agent 含 "GoClaw" → tool_call 池），保持既有行为。
+// 规则按配置顺序评估，首条命中的规则生效；未配置时不存在路由规则，全部流量走默认池。
 type RoutingConfig struct {
 	Rules []RoutingRule `yaml:"rules"`
 }
 
-// RoutingRule 描述一条路由规则：Match 条件命中后，请求只从 Pool 标签对应的后端子池
-// 中选择，动态后端覆盖（X-Backend-URL / ?backend=）对该规则不生效；请求失败时自动
-// 故障转移到子池内下一个未尝试的后端。
+// RoutingRule 描述一条路由规则：Header 条件命中后，请求只从 Pool 标签对应的后端子池
+// 中选择；请求失败时自动故障转移到子池内下一个未尝试的后端。
 type RoutingRule struct {
 	// Name 规则名，仅用于日志与报错；留空时按序号生成。
 	Name string `yaml:"name"`
-	// Match 规则命中条件，各条件同时配置时为 AND 关系。
-	Match RuleMatch `yaml:"match"`
-	// Pool 标签名：命中后只从携带该标签（tags 或 tool_call）的后端中选择。
+	// Header 规则命中条件：每个请求头的名称与值都必须与客户端请求头匹配，map 内所有
+	// key 同时满足（AND）才算命中。头名按规范化形式比较（服务端不区分大小写），头值
+	// trim 后精确相等、区分大小写。
+	Header map[string]string `yaml:"header"`
+	// Pool 标签名：命中后只从携带该标签（tags）的后端中选择。
 	Pool string `yaml:"pool"`
-}
-
-// RuleMatch 描述规则命中条件。
-type RuleMatch struct {
-	// UserAgentContains 非空时要求 User-Agent 包含该子串（忽略大小写）。
-	UserAgentContains string `yaml:"user_agent_contains"`
-	// Headers 中任一请求头的值与配置值完全匹配即视为该条件命中（与 coding.header 同款语义）。
-	Headers map[string]string `yaml:"header"`
 }
 
 // SchedulingConfig 描述进程调度子系统的配置。为 nil 时整个调度子系统禁用，
@@ -74,11 +65,13 @@ type SchedulingConfig struct {
 }
 
 // ProcessConfig 描述模型进程的启动配置（coding/background 共用）。
-// Header 仅对 coding 生效：允许配置多组，任一请求头的值与对应值完全匹配即判定为开发(coding)流量。
+// Model 固化该进程对外服务的模型 ID：客户端请求该模型 ID 时，调度器据此启动
+// （或切换到）对应进程；启动时校验所有模型 ID 互不重复，保证路由无歧义。
 type ProcessConfig struct {
-	Command      string            `yaml:"command"`
-	Header       map[string]string `yaml:"header"`
-	ReadinessURL string            `yaml:"readiness_url"`
+	Command string `yaml:"command"`
+	// Model 固化该进程服务的模型 ID（如 "qwen3.8"），请求该 ID 时路由/启动对应进程。
+	Model        string `yaml:"model"`
+	ReadinessURL string `yaml:"readiness_url"`
 	// APIKey 是模型进程自身的 API Key（对应 llama-server 的 --api-key）。
 	// 非空时：就绪探测与代理转发均使用 Authorization: Bearer <key>，客户端 key 与后端 key 隔离。
 	APIKey  string `yaml:"api_key"`
@@ -86,24 +79,18 @@ type ProcessConfig struct {
 	// Weight 仅对 background 生效：本地 background 模型进程就绪后作为后端节点加入
 	// 代理池（与 backends.list 一起负载均衡）时的权重，未配置按 1 处理。
 	Weight int `yaml:"weight"`
-	// ToolCall 仅对 background 生效：本地 background 模型支持工具调用（tool calls）。
-	// 入池后 User-Agent 含 "GoClaw" 的请求（依赖工具调用）也会路由到它。
-	ToolCall bool `yaml:"tool_call"`
 	// Tags 仅对 background 生效：本地 background 节点入池后携带的路由标签，
-	// routing 规则的 pool 可与之对应（tool_call: true 等价于含 "tool_call" 标签）。
+	// routing 规则的 pool 可与之对应（含 "tool_call" 标签即加入 tool_call 子池）。
 	Tags []string `yaml:"tags"`
 }
 
 // EffectiveTags 返回本地 background 节点的有效标签集（语义同 BackendConfig.EffectiveTags）。
 func (p *ProcessConfig) EffectiveTags() map[string]bool {
-	tags := make(map[string]bool, len(p.Tags)+1)
+	tags := make(map[string]bool, len(p.Tags))
 	for _, t := range p.Tags {
 		if t = strings.TrimSpace(t); t != "" {
 			tags[t] = true
 		}
-	}
-	if p.ToolCall {
-		tags["tool_call"] = true
 	}
 	return tags
 }
@@ -148,9 +135,8 @@ type PostgreSQLConfig struct {
 }
 
 type BackendsConfig struct {
-	AllowDynamic bool            `yaml:"allow_dynamic"`
-	List         []BackendConfig `yaml:"list"`
-	Strategy     string          `yaml:"strategy"`
+	List     []BackendConfig `yaml:"list"`
+	Strategy string          `yaml:"strategy"`
 }
 
 type BackendConfig struct {
@@ -161,24 +147,18 @@ type BackendConfig struct {
 	Model string `yaml:"model"`
 	// APIKey 是该后端自身的 API Key，转发时自动注入 Authorization: Bearer <key>。
 	APIKey string `yaml:"api_key"`
-	// ToolCall 表示该后端模型支持工具调用（tool calls）。
-	// User-Agent 含 "GoClaw" 的请求依赖工具调用，只路由到 tool_call: true 的后端。
-	ToolCall bool `yaml:"tool_call"`
 	// Tags 是该后端加入的路由标签池列表；routing 规则按 pool 标签选择后端。
+	// 加入 "tool_call" 标签即表示该后端支持工具调用，可供 routing 规则 pool: "tool_call" 选用。
 	Tags []string `yaml:"tags"`
 }
 
-// EffectiveTags 返回后端的有效标签集：显式 tags 与 tool_call 布尔值的并集
-// （tool_call: true 等价于含 "tool_call" 标签）。
+// EffectiveTags 返回后端的有效标签集（显式 tags 去除空白后的集合）。
 func (b *BackendConfig) EffectiveTags() map[string]bool {
-	tags := make(map[string]bool, len(b.Tags)+1)
+	tags := make(map[string]bool, len(b.Tags))
 	for _, t := range b.Tags {
 		if t = strings.TrimSpace(t); t != "" {
 			tags[t] = true
 		}
-	}
-	if b.ToolCall {
-		tags["tool_call"] = true
 	}
 	return tags
 }
@@ -205,17 +185,122 @@ func Load(path string) (*YAMLConfig, error) {
 		return nil, err
 	}
 
+	if err := checkLegacyRouting(data); err != nil {
+		return nil, err
+	}
+
 	setConfigDefaults(cfg)
 
 	if err := validateRouting(cfg.Routing); err != nil {
 		return nil, err
 	}
 
+	if err := validateSchedulingModels(cfg.Scheduling); err != nil {
+		return nil, err
+	}
+
+	if err := cfg.ValidateModelIDs(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
 }
 
-// validateRouting 校验 routing 规则：每条规则必须指定 pool，且 match 至少包含
-// user_agent_contains 或 header 条件之一。
+// validateSchedulingModels 校验调度配置：启用了某模型进程（command 非空）时必须
+// 固化该进程服务的模型 ID（model），并显式指定就绪探测地址 readiness_url。
+func validateSchedulingModels(sc *SchedulingConfig) error {
+	if sc == nil {
+		return nil
+	}
+	for _, e := range []struct {
+		name string
+		pc   *ProcessConfig
+	}{
+		{"scheduling.coding", &sc.Coding},
+		{"scheduling.background", &sc.Background},
+	} {
+		if e.pc.Command == "" {
+			continue
+		}
+		if strings.TrimSpace(e.pc.Model) == "" {
+			return fmt.Errorf("%s: 配置了 command 时必须固化模型名称 model（客户端按该模型 ID 请求/触发启动）", e.name)
+		}
+		if strings.TrimSpace(e.pc.ReadinessURL) == "" {
+			return fmt.Errorf("%s: 配置了 command 时必须指定 readiness_url（就绪探测地址）", e.name)
+		}
+	}
+	return nil
+}
+
+// ValidateModelIDs 校验所有已配置的模型 ID（backends.list 的 model 与 scheduling 的
+// coding/background model）互不重复，且不与代理占位 ID llm_prox 冲突：
+// 具体模型 ID 路由要求"一个模型 ID 唯一对应一个后端/进程"，重复会导致路由歧义。
+func (c *YAMLConfig) ValidateModelIDs() error {
+	const proxyID = "llm_prox"
+	seen := make(map[string]string)
+	locate := func(modelID, where string) error {
+		if modelID == proxyID {
+			return fmt.Errorf("%s: 模型 ID %q 与代理占位 ID %s 冲突（%s 保留用于轮询负载均衡）", where, modelID, proxyID, proxyID)
+		}
+		if prev, dup := seen[modelID]; dup {
+			return fmt.Errorf("模型 ID %q 重复：同时配置在 %s 与 %s（具体模型路由要求模型 ID 全局唯一）", modelID, prev, where)
+		}
+		seen[modelID] = where
+		return nil
+	}
+	for i := range c.Backends.List {
+		b := &c.Backends.List[i]
+		if m := strings.TrimSpace(b.Model); m != "" {
+			if err := locate(m, "backends.list["+b.Name+"]"); err != nil {
+				return err
+			}
+		}
+	}
+	if c.Scheduling != nil {
+		for _, entry := range []struct {
+			name string
+			m    string
+		}{
+			{"scheduling.coding", strings.TrimSpace(c.Scheduling.Coding.Model)},
+			{"scheduling.background", strings.TrimSpace(c.Scheduling.Background.Model)},
+		} {
+			if entry.m == "" {
+				continue
+			}
+			if err := locate(entry.m, entry.name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// checkLegacyRouting 检测旧版 routing 配置字段（match / user_agent_contains）并给出
+// 迁移提示；这些字段已不再支持。
+func checkLegacyRouting(data []byte) error {
+	var legacy struct {
+		Routing *struct {
+			Rules []struct {
+				Match             map[string]any `yaml:"match"`
+				UserAgentContains string         `yaml:"user_agent_contains"`
+			} `yaml:"rules"`
+		} `yaml:"routing"`
+	}
+	if err := yaml.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+	if legacy.Routing == nil {
+		return nil
+	}
+	for i, lr := range legacy.Routing.Rules {
+		if lr.Match != nil || lr.UserAgentContains != "" {
+			return fmt.Errorf("routing.rules[%d]: 旧字段 match/user_agent_contains 已移除，请改写为 header（如 User-Agent: \"完整User-Agent值\"）", i)
+		}
+	}
+	return nil
+}
+
+// validateRouting 校验 routing 规则：每条规则必须指定 pool 与非空 header。
 func validateRouting(rc *RoutingConfig) error {
 	if rc == nil {
 		return nil
@@ -224,8 +309,8 @@ func validateRouting(rc *RoutingConfig) error {
 		if strings.TrimSpace(rr.Pool) == "" {
 			return fmt.Errorf("routing.rules[%d]: pool 不能为空", i)
 		}
-		if rr.Match.UserAgentContains == "" && len(rr.Match.Headers) == 0 {
-			return fmt.Errorf("routing.rules[%d]: match 至少需要 user_agent_contains 或 header", i)
+		if len(rr.Header) == 0 {
+			return fmt.Errorf("routing.rules[%d]: header 不能为空（需配置至少一个请求头条件）", i)
 		}
 	}
 	return nil
@@ -286,15 +371,6 @@ func setConfigDefaults(cfg *YAMLConfig) {
 	}
 
 	if cfg.Scheduling != nil {
-		if cfg.Scheduling.Coding.Header == nil {
-			cfg.Scheduling.Coding.Header = map[string]string{"X-LLM-Purpose": "coding"}
-		}
-		if cfg.Scheduling.Coding.ReadinessURL == "" {
-			cfg.Scheduling.Coding.ReadinessURL = "http://127.0.0.1:8080"
-		}
-		if cfg.Scheduling.Background.ReadinessURL == "" {
-			cfg.Scheduling.Background.ReadinessURL = "http://127.0.0.1:8080"
-		}
 		if cfg.Scheduling.Lease.CodingIdleTimeout == 0 {
 			cfg.Scheduling.Lease.CodingIdleTimeout = 30 * time.Minute
 		}
@@ -317,19 +393,18 @@ func (c *YAMLConfig) HasScheduling() bool {
 
 func (c *YAMLConfig) ToLegacy() Config {
 	return Config{
-		ListenAddr:          c.Server.ListenAddr,
-		AllowDynamicBackend: c.Backends.AllowDynamic,
-		DataDir:             c.Server.DataDir,
-		RetentionDays:       c.Proxy.RetentionDays,
-		MaxRequestBytes:     int64(c.Proxy.MaxRequestBytes),
-		MaxCaptureBytes:     int64(c.Proxy.MaxCaptureBytes),
-		RequestTimeout:      time.Duration(c.Proxy.RequestTimeout) * time.Second,
-		PollBackendMetrics:  c.Proxy.PollBackendMetrics != nil && *c.Proxy.PollBackendMetrics,
-		PollInterval:        time.Duration(c.Proxy.PollInterval) * time.Second,
-		RecordPaths:         c.Proxy.RecordPaths,
-		APIKey:              c.Proxy.APIKey,
-		UIAllowedHosts:      c.Server.UIAllowedHosts,
-		LogLevel:            c.Server.LogLevel,
+		ListenAddr:         c.Server.ListenAddr,
+		DataDir:            c.Server.DataDir,
+		RetentionDays:      c.Proxy.RetentionDays,
+		MaxRequestBytes:    int64(c.Proxy.MaxRequestBytes),
+		MaxCaptureBytes:    int64(c.Proxy.MaxCaptureBytes),
+		RequestTimeout:     time.Duration(c.Proxy.RequestTimeout) * time.Second,
+		PollBackendMetrics: c.Proxy.PollBackendMetrics != nil && *c.Proxy.PollBackendMetrics,
+		PollInterval:       time.Duration(c.Proxy.PollInterval) * time.Second,
+		RecordPaths:        c.Proxy.RecordPaths,
+		APIKey:             c.Proxy.APIKey,
+		UIAllowedHosts:     c.Server.UIAllowedHosts,
+		LogLevel:           c.Server.LogLevel,
 	}
 }
 

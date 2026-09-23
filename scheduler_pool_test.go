@@ -50,7 +50,6 @@ func newPoolTestServer(t *testing.T, cfg *config.SchedulingConfig, staticBackend
 	t.Helper()
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: time.Second}
 	sched := scheduler.New(cfg, time.Hour, sw, &http.Client{})
-	sched.SetLogger(func(string, ...any) {})
 	sched.SetProbe(func(context.Context, string) bool { return true })
 	if err := sched.Start(context.Background()); err != nil {
 		t.Fatalf("scheduler start: %v", err)
@@ -72,7 +71,6 @@ func newPoolTestServer(t *testing.T, cfg *config.SchedulingConfig, staticBackend
 	svc := &Server{
 		cfg: config.Config{
 			ListenAddr:          ":0",
-			AllowDynamicBackend: true,
 			DataDir:             dataDir,
 			MaxRequestBytes:     2 << 20,
 			MaxCaptureBytes:     2 << 20,
@@ -92,16 +90,18 @@ func newPoolTestServer(t *testing.T, cfg *config.SchedulingConfig, staticBackend
 	return svc
 }
 
-// testDo 经代理发起一次 chat 请求，返回状态码。coding=true 时携带 X-LLM-Purpose: coding。
+// testDo 经代理发起一次 chat 请求，返回状态码。coding=true 时请求 coding 固化的模型 ID，
+// 否则请求 llm_prox（轮询代理池）。
 func (s *Server) testDo(t *testing.T, proxyURL string, coding bool) int {
 	t.Helper()
+	model := ProxyModelID
+	if coding {
+		model = s.yamlCfg.Scheduling.Coding.Model
+	}
 	req, _ := http.NewRequest(http.MethodPost, proxyURL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"x","messages":[]}`))
+		strings.NewReader(`{"model":"`+model+`","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer client-key")
-	if coding {
-		req.Header.Set("X-LLM-Purpose", "coding")
-	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("proxy do: %v", err)
@@ -121,11 +121,12 @@ func TestHandleProxySchedulerPool(t *testing.T) {
 
 	cfg := &config.SchedulingConfig{
 		Coding: config.ProcessConfig{
-			Header:       map[string]string{"X-LLM-Purpose": "coding"},
+			Model:        "qwen3.8",
 			ReadinessURL: local.URL,
 			APIKey:       "coding-key",
 		},
 		Background: config.ProcessConfig{
+			Model:        "qwen3.6",
 			ReadinessURL: local.URL,
 			APIKey:       "bg-key",
 			Weight:       2,
@@ -177,11 +178,12 @@ func TestHandleProxySchedulerCodingPool(t *testing.T) {
 
 	cfg := &config.SchedulingConfig{
 		Coding: config.ProcessConfig{
-			Header:       map[string]string{"X-LLM-Purpose": "coding"},
+			Model:        "qwen3.8",
 			ReadinessURL: local.URL,
 			APIKey:       "coding-key",
 		},
 		Background: config.ProcessConfig{
+			Model:        "qwen3.6",
 			ReadinessURL: local.URL,
 			APIKey:       "bg-key",
 		},
@@ -249,18 +251,18 @@ func TestHandleProxySchedulerKeyIsolation(t *testing.T) {
 
 	cfg := &config.SchedulingConfig{
 		Coding: config.ProcessConfig{
-			Header:       map[string]string{"X-LLM-Purpose": "coding"},
+			Model:        "qwen3.8",
 			ReadinessURL: backend.URL,
 			APIKey:       "coding-key",
 		},
 		Background: config.ProcessConfig{
+			Model:        "qwen3.6",
 			ReadinessURL: backend.URL,
 			APIKey:       "bg-key",
 		},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: time.Second}
 	sched := scheduler.New(cfg, time.Hour, sw, &http.Client{})
-	sched.SetLogger(func(string, ...any) {})
 	sched.SetProbe(func(context.Context, string) bool { return true })
 	if err := sched.Start(context.Background()); err != nil {
 		t.Fatalf("scheduler start: %v", err)
@@ -284,7 +286,6 @@ func TestHandleProxySchedulerKeyIsolation(t *testing.T) {
 	svc := &Server{
 		cfg: config.Config{
 			ListenAddr:          ":0",
-			AllowDynamicBackend: true,
 			DataDir:             dataDir,
 			MaxRequestBytes:     2 << 20,
 			MaxCaptureBytes:     2 << 20,
@@ -305,13 +306,14 @@ func TestHandleProxySchedulerKeyIsolation(t *testing.T) {
 	defer proxy.Close()
 
 	do := func(coding bool) int {
+		model := ProxyModelID
+		if coding {
+			model = cfg.Coding.Model
+		}
 		req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions",
-			strings.NewReader(`{"model":"x","messages":[]}`))
+			strings.NewReader(`{"model":"`+model+`","messages":[]}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer client-key")
-		if coding {
-			req.Header.Set("X-LLM-Purpose", "coding")
-		}
 		resp, err := proxy.Client().Do(req)
 		if err != nil {
 			t.Fatalf("proxy do: %v", err)
@@ -334,9 +336,8 @@ func TestHandleProxySchedulerKeyIsolation(t *testing.T) {
 	}
 }
 
-// TestHandleProxySchedulerGoClawBackground 验证本地 background 节点配置
-// tool_call: true 后入池：GoClaw 流量（User-Agent 含 GoClaw）只命中该节点，
-// 普通流量仍按全量池分发。
+// TestHandleProxySchedulerGoClawBackground 验证本地 background 节点带 tool_call 标签
+// 入池后：命中 tool_call 路由规则的请求只命中该节点，普通流量仍按全量池分发。
 func TestHandleProxySchedulerGoClawBackground(t *testing.T) {
 	local, localRec := newRecordingBackend()
 	remote, remoteRec := newRecordingBackend()
@@ -345,25 +346,31 @@ func TestHandleProxySchedulerGoClawBackground(t *testing.T) {
 
 	cfg := &config.SchedulingConfig{
 		Coding: config.ProcessConfig{
-			Header:       map[string]string{"X-LLM-Purpose": "coding"},
+			Model:        "qwen3.8",
 			ReadinessURL: local.URL,
 			APIKey:       "coding-key",
 		},
 		Background: config.ProcessConfig{
+			Model:        "qwen3.6",
 			ReadinessURL: local.URL,
 			APIKey:       "bg-key",
 			Weight:       1,
-			ToolCall:     true,
+			Tags:         []string{"tool_call"},
 		},
 	}
 	staticBackends := []config.BackendConfig{
 		{Name: "remote", URL: remote.URL, Weight: 1, APIKey: "remote-key"},
 	}
 	svc := newPoolTestServer(t, cfg, staticBackends, "rr")
+	svc.yamlCfg.Routing = &config.RoutingConfig{Rules: []config.RoutingRule{{
+		Name:   "goclaw",
+		Header: map[string]string{"User-Agent": "GoClaw/2.1"},
+		Pool:   "tool_call",
+	}}}
 
-	// 本地节点入池后应携带 tool_call 标记。
-	if b := svc.balancer.GetBackendByName(localBackgroundBackendName); b == nil || !b.ToolCall {
-		t.Fatalf("local node in pool = %+v, want ToolCall=true", b)
+	// 本地节点入池后应携带 tool_call 标签。
+	if b := svc.balancer.GetBackendByName(localBackgroundBackendName); b == nil || !b.EffectiveTags()["tool_call"] {
+		t.Fatalf("local node in pool = %+v, want tool_call tag", b)
 	}
 
 	proxy := httptest.NewServer(svc)
@@ -371,7 +378,7 @@ func TestHandleProxySchedulerGoClawBackground(t *testing.T) {
 
 	do := func(ua string) int {
 		req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions",
-			strings.NewReader(`{"model":"x","messages":[]}`))
+			strings.NewReader(`{"model":"`+ProxyModelID+`","messages":[]}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer client-key")
 		req.Header.Set("User-Agent", ua)
@@ -383,7 +390,7 @@ func TestHandleProxySchedulerGoClawBackground(t *testing.T) {
 		return resp.StatusCode
 	}
 
-	// GoClaw 只命中本地（唯一 tool_call 节点）。
+	// 命中规则的请求只命中本地（唯一 tool_call 节点）。
 	for i := 0; i < 4; i++ {
 		if code := do("GoClaw/2.1"); code != http.StatusOK {
 			t.Fatalf("GoClaw request #%d status=%d, want 200", i, code)

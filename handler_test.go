@@ -47,9 +47,12 @@ func TestHandleModels(t *testing.T) {
 		{Name: "llm_proxy", URL: "http://proxy:8080", Weight: 1},
 	}
 	cfg := config.Config{
-		AllowDynamicBackend: true,
 	}
-	svc := &Server{cfg: cfg, balancer: balancer.New(backends, "rr")}
+	svc := &Server{
+		cfg:      cfg,
+		balancer: balancer.New(backends, "rr"),
+		yamlCfg:  &config.YAMLConfig{Backends: config.BackendsConfig{List: backends}},
+	}
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -70,9 +73,10 @@ func TestHandleModels(t *testing.T) {
 	if payload.Object != "list" {
 		t.Fatalf("object=%q", payload.Object)
 	}
-	// 固定返回单个占位模型 llm_prox，与后端配置/负载均衡无关
-	if len(payload.Data) != 1 || payload.Data[0].ID != "llm_prox" {
-		t.Fatalf("expected exactly llm_prox, got %+v", payload.Data)
+	// 返回占位模型 llm_prox + 已配置的具体模型 ID（qwen 后端部署 qwen3.8；
+	// llm_proxy 后端未配置 model，不出现）。
+	if len(payload.Data) != 2 || payload.Data[0].ID != "llm_prox" || payload.Data[1].ID != "qwen3.8" {
+		t.Fatalf("expected llm_prox + qwen3.8, got %+v", payload.Data)
 	}
 }
 

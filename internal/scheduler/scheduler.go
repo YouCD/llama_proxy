@@ -1,8 +1,9 @@
-// Package scheduler 负责按开发流量拉起/切换 llama.cpp 模型进程。
+// Package scheduler 负责按请求的模型 ID 拉起/切换 llama.cpp 模型进程。
 package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -23,8 +24,10 @@ const (
 	modeBackground = "background"
 )
 
-// Scheduler 负责根据 opencode 的开发流量启动/切换 llama.cpp 模型进程。
-// 仅在配置了 scheduling 时由 main 装配启用；未启用时为 nil，代理退化为纯转发。
+// Scheduler 负责根据请求的模型 ID 启动/切换 llama.cpp 模型进程：
+// 请求命中 cfg.Coding.Model 时切换/启动 coding 进程，命中 cfg.Background.Model 时
+// 确保 background 进程就绪。仅在配置了 scheduling 时由 main 装配启用；未启用时为 nil，
+// 代理退化为纯转发。
 type Scheduler struct {
 	cfg    *config.SchedulingConfig
 	lease  time.Duration
@@ -33,13 +36,21 @@ type Scheduler struct {
 
 	// activeCount 返回当前在途请求数，用于切换时的优雅排空。
 	activeCount func() int64
-	infof       func(format string, args ...any)
 	probe       func(ctx context.Context, url string) bool
 
 	mu sync.Mutex
 	// switchMu 串行化整个进程切换过程（ensureTarget），防止并发切换覆盖 readyCh，
 	// 导致等待者持有的旧 channel 永不关闭。
 	switchMu sync.Mutex
+
+	// 在途切换跟踪：某个切换持有 switchMu 期间，switchTarget/switchCancel 标识它，
+	// 使更高优先级的请求可以抢占它（取消其就绪等待）而不是排在其后等待。
+	// preempted 为单调标志：一旦发生过抢占就保持为 true（唯一读者是 Start，
+	// 用它判断“首次 background 加载被 coding 请求抢占”这一非致命情况）。
+	// 均由 s.mu 保护。
+	switchTarget string
+	switchCancel context.CancelFunc
+	preempted    bool
 
 	mode          string
 	readyOK       bool
@@ -51,16 +62,14 @@ type Scheduler struct {
 	started       bool
 }
 
-// NewScheduler 基于调度配置创建一个调度器。默认日志走全局 log。
+// NewScheduler 基于调度配置创建一个调度器。日志走全局 log（[scheduler] 前缀）。
 func New(cfg *config.SchedulingConfig, lease time.Duration, sw config.SwitchConfig, client *http.Client) *Scheduler {
-	s := &Scheduler{
+	return &Scheduler{
 		cfg:    cfg,
 		lease:  lease,
 		sw:     sw,
 		client: client,
-		infof:  func(format string, args ...any) { log.WithCtx(nil).Infof("[scheduler] "+format, args...) },
 	}
-	return s
 }
 
 // SetProbe 覆盖就绪探测函数（主要用于测试）。
@@ -75,12 +84,6 @@ func (s *Scheduler) SetActiveCount(f func() int64) *Scheduler {
 	return s
 }
 
-// SetLogger 覆盖内部日志函数（主要用于测试）。
-func (s *Scheduler) SetLogger(f func(format string, args ...any)) *Scheduler {
-	s.infof = f
-	return s
-}
-
 // Start 启动调度器：首次拉起 background 进程并等待就绪。
 func (s *Scheduler) Start(ctx context.Context) error {
 	s.mu.Lock()
@@ -91,6 +94,12 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 	if _, err := s.ensureTarget(ctx, modeBackground, s.cfg.Background.Command, s.cfg.Background.ReadinessURL, s.cfg.Background.APIKey, s.cfg.Background.LogFile); err != nil {
+		// 若首次 background 加载期间有 coding 请求到达并抢占了它，则这不是致命错误：
+		// coding 切换已在进行，而 main.go 对 Start 的任何错误都会 Fatalf 杀掉代理。
+		if s.wasPreempted() {
+			log.WithCtx(nil).Infof("[scheduler] initial background start preempted by coding request; continuing")
+			return nil
+		}
 		return fmt.Errorf("initial background start: %w", err)
 	}
 	return nil
@@ -109,17 +118,6 @@ func (s *Scheduler) Shutdown() {
 	if logFile != nil {
 		_ = logFile.Close()
 	}
-}
-
-// CodingHeaderMatch 判定一个请求是否为开发(coding)流量。
-// 任一配置的 header 名称存在且其值与配置值完全匹配即为开发流量。
-func (s *Scheduler) CodingHeaderMatch(h http.Header) bool {
-	for name, want := range s.cfg.Coding.Header {
-		if v := strings.TrimSpace(h.Get(name)); v != "" && v == want {
-			return true
-		}
-	}
-	return false
 }
 
 // EnsureCoding 确保 coding 进程已就绪。若当前不在 coding 模式或未就绪则触发切换，
@@ -144,14 +142,22 @@ func (s *Scheduler) EnsureCoding(ctx context.Context) (chan struct{}, error) {
 	return ready, err
 }
 
-// TouchCoding 刷新开发租约时间。每次收到开发流量都应调用。
+// EnsureBackground 确保 background 进程已就绪（请求 background 固化模型 ID 时使用）。
+// 若当前不在 background 模式或未就绪则触发切换，并返回就绪信号 channel。
+// 注意：coding 租约仍活跃时 background 切换会被跳过（保护正在使用的 coding 进程），
+// 调用方应先检查 IsCodingActive/BackgroundReady。
+func (s *Scheduler) EnsureBackground(ctx context.Context) (chan struct{}, error) {
+	return s.ensureTarget(ctx, modeBackground, s.cfg.Background.Command, s.cfg.Background.ReadinessURL, s.cfg.Background.APIKey, s.cfg.Background.LogFile)
+}
+
+// TouchCoding 刷新开发租约时间。每次收到 coding 模型流量都应调用。
 func (s *Scheduler) TouchCoding() {
 	s.mu.Lock()
 	s.lastCodingAt = time.Now()
 	s.mu.Unlock()
 }
 
-// IsCodingActive 报告当前是否处于开发状态：即正在 coding 模式，或距离最后一次开发流量仍在租约内。
+// IsCodingActive 报告当前是否处于开发状态：即正在 coding 模式，或距离最后一次 coding 模型流量仍在租约内。
 func (s *Scheduler) IsCodingActive() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -214,7 +220,7 @@ func apiBaseFromReadiness(readinessURL string) string {
 	return u.Scheme + "://" + u.Host + "/v1"
 }
 
-// Loop 运行租约超时检查与周期性就绪探活：距最后一次开发流量超过 lease 则切回
+// Loop 运行租约超时检查与周期性就绪探活：距最后一次 coding 模型流量超过 lease 则切回
 // background；同时每 5s 对当前模式进程做就绪探测，恢复因启动超时误标为未就绪的进程。
 func (s *Scheduler) Loop(ctx context.Context) {
 	if s.lease <= 0 {
@@ -235,7 +241,7 @@ func (s *Scheduler) Loop(ctx context.Context) {
 			idle := s.mode == modeCoding && !s.lastCodingAt.IsZero() && time.Since(s.lastCodingAt) >= s.lease
 			s.mu.Unlock()
 			if idle {
-				s.infof("coding idle timeout reached, switching to background")
+				log.WithCtx(nil).Infof("[scheduler] coding idle timeout reached, switching to background")
 				_, _ = s.ensureTarget(context.Background(), modeBackground, s.cfg.Background.Command, s.cfg.Background.ReadinessURL, s.cfg.Background.APIKey, s.cfg.Background.LogFile)
 			}
 		}
@@ -245,7 +251,15 @@ func (s *Scheduler) Loop(ctx context.Context) {
 // ensureTarget 将当前进程切换到 target 模式并等待就绪。
 // 通过 switchMu 串行化整个切换过程（含 drain/停止旧进程/等待就绪），
 // 防止并发切换互相覆盖 readyCh 导致等待者永久阻塞。
+// 优先级：coding > background。在获取 switchMu 之前，若当前已有更低优先级的
+// 切换在途（switchTarget），则取消其就绪等待（switchCancel），使本次切换可以
+// 插队而不是排队等它跑完。这样 coding 请求在 background 大模型加载期间到达时
+// 可以立即打断加载：两者共用同一端口，background 本来就要先被杀掉才能加载
+// coding，等它加载完纯属浪费（最坏可达 2*startup_timeout 的纯延迟）。
 func (s *Scheduler) ensureTarget(ctx context.Context, target, command, readinessURL, apiKey, logFile string) (chan struct{}, error) {
+	// coding 请求抢占在途的 background 切换（加载或切回），先于获取 switchMu。
+	s.preemptLowerPriority(target)
+
 	// 串行化切换：同一时刻只允许一个切换在执行，避免并发 ensureTarget 覆盖 readyCh。
 	s.switchMu.Lock()
 	defer s.switchMu.Unlock()
@@ -259,7 +273,30 @@ func (s *Scheduler) ensureTarget(ctx context.Context, target, command, readiness
 	}
 	s.mu.Unlock()
 
-	s.infof("switching to %s", target)
+	// background 切换且 coding 租约仍活跃：跳过切换，避免杀掉已就绪/正在使用的
+	// coding 进程。覆盖启动竞态：coding 请求先抢到首次切换并完成，随后
+	// Start 的 background 切换不应把它杀掉（与上面的抢占互为镜像）。
+	if target == modeBackground {
+		s.mu.Lock()
+		codingActive := s.mode == modeCoding && s.lease > 0 &&
+			!s.lastCodingAt.IsZero() && time.Since(s.lastCodingAt) < s.lease
+		s.mu.Unlock()
+		if codingActive {
+			log.WithCtx(nil).Infof("[scheduler] skip background switch: coding lease still active")
+			ch := s.getReadyCh()
+			if ch == nil {
+				ch = make(chan struct{})
+				s.mu.Lock()
+				if s.readyCh == nil {
+					s.readyCh = ch
+				}
+				s.mu.Unlock()
+			}
+			return ch, nil
+		}
+	}
+
+	log.WithCtx(nil).Infof("[scheduler] switching to %s", target)
 
 	// 优雅排空在途请求。
 	s.drain()
@@ -270,7 +307,7 @@ func (s *Scheduler) ensureTarget(ctx context.Context, target, command, readiness
 	// 打开新进程的日志文件（若配置了）。
 	f, err := openProcessLog(logFile)
 	if err != nil {
-		s.infof("open log file %s failed: %v", logFile, err)
+		log.WithCtx(nil).Warnf("[scheduler] open log file %s failed: %v", logFile, err)
 	}
 	if f != nil {
 		s.mu.Lock()
@@ -293,23 +330,40 @@ func (s *Scheduler) ensureTarget(ctx context.Context, target, command, readiness
 			cmd.Stderr = f
 		}
 		if err := cmd.Start(); err != nil {
-			s.infof("start %s command failed: %v", target, err)
+			log.WithCtx(nil).Warnf("[scheduler] start %s command failed: %v", target, err)
+			s.mu.Lock()
+			s.clearSwitchInflightLocked()
+			s.mu.Unlock()
 			s.markReadyClosed(newReady)
 			return newReady, err
 		}
-		s.infof("%s process started pid=%d log=%v", target, cmd.Process.Pid, f != nil)
+		log.WithCtx(nil).Infof("[scheduler] %s process started pid=%d log=%v", target, cmd.Process.Pid, f != nil)
 		s.mu.Lock()
 		s.cmd = cmd
 		s.mu.Unlock()
 		go s.reap(cmd)
 	}
 
-	// 等待就绪。
-	if err := s.waitReady(ctx, readinessURL, apiKey, s.sw.StartupTimeout); err != nil {
-		s.infof("%s ready probe failed (will reconcile later): %v", target, err)
+	// 等待就绪。使用 switchCtx（调用方 ctx 的子 context）：更高优先级的切换
+	// 可通过 switchCancel 抢占本次切换，即使调用方本身仍在等待也能提前结束等待。
+	switchCtx, switchCancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.switchTarget = target
+	s.switchCancel = switchCancel
+	s.mu.Unlock()
+	defer switchCancel()
+
+	if err := s.waitReady(switchCtx, readinessURL, apiKey, s.sw.StartupTimeout); err != nil {
 		s.mu.Lock()
 		s.readyOK = false
+		s.clearSwitchInflightLocked()
+		wasPreempted := s.preempted
 		s.mu.Unlock()
+		if wasPreempted && errors.Is(switchCtx.Err(), context.Canceled) {
+			log.WithCtx(nil).Infof("[scheduler] %s switch preempted by higher-priority request", target)
+			return newReady, fmt.Errorf("%s switch preempted by higher-priority request", target)
+		}
+		log.WithCtx(nil).Warnf("[scheduler] %s ready probe failed (will reconcile later): %v", target, err)
 		// 失败时不再关闭 newReady，交由 reconcileReady 在进程真正就绪后放行等待者。
 		return newReady, err
 	}
@@ -320,10 +374,57 @@ func (s *Scheduler) ensureTarget(ctx context.Context, target, command, readiness
 	if target == modeCoding {
 		s.lastCodingAt = now
 	}
+	s.clearSwitchInflightLocked()
 	s.mu.Unlock()
-	s.infof("%s ready", target)
+	log.WithCtx(nil).Infof("[scheduler] %s ready", target)
 	s.markReadyClosed(newReady)
 	return newReady, nil
+}
+
+// switchPriority 返回切换目标的抢占优先级：coding > background。
+func switchPriority(target string) int {
+	switch target {
+	case modeCoding:
+		return 2
+	case modeBackground:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// preemptLowerPriority 取消在途的更低优先级切换（switchTarget/switchCancel）的
+// 就绪等待。在获取 switchMu 之前调用：background 加载期间 coding 请求到达时直接
+// 插队，而不是排队等 background 加载完成。被抢占的切换会在 waitReady 中观察到
+// 取消，重置状态并释放 switchMu，随后本次切换正常执行（其 stopProcess 会杀掉
+// 被抢占切换刚启动的进程）。
+func (s *Scheduler) preemptLowerPriority(target string) {
+	s.mu.Lock()
+	prev := s.switchTarget
+	cancel := s.switchCancel
+	if cancel == nil || switchPriority(target) <= switchPriority(prev) {
+		s.mu.Unlock()
+		return
+	}
+	s.preempted = true
+	s.mu.Unlock()
+	log.WithCtx(nil).Infof("[scheduler] preempting in-flight %s switch with %s request", prev, target)
+	cancel()
+}
+
+// clearSwitchInflightLocked 清除在途切换登记。调用方须持有 s.mu。
+func (s *Scheduler) clearSwitchInflightLocked() {
+	s.switchTarget = ""
+	s.switchCancel = nil
+}
+
+// wasPreempted 报告是否发生过抢占。唯一读者是 Start：用它判断
+// “首次 background 加载被 coding 请求抢占”这一非致命情况（main.go 对 Start
+// 的任何错误都会 Fatalf）。
+func (s *Scheduler) wasPreempted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.preempted
 }
 
 // markReadyClosed 持锁关闭 ready channel 并记录状态。
@@ -377,7 +478,7 @@ func (s *Scheduler) reconcileReady() {
 		s.mu.Lock()
 		if !s.readyOK {
 			s.readyOK = true
-			s.infof("%s became ready (reconciled)", mode)
+			log.WithCtx(nil).Infof("[scheduler] %s became ready (reconciled)", mode)
 			s.mu.Unlock()
 			s.markReadyClosed(ch)
 		} else {
@@ -440,7 +541,7 @@ func (s *Scheduler) stopProcess() {
 	if logFile != nil {
 		_ = logFile.Close()
 	}
-	s.infof("stopped previous process")
+	log.WithCtx(nil).Infof("[scheduler] stopped previous process")
 }
 
 // reap 回收已退出的子进程，防止僵尸进程。进程意外退出时清除就绪标记，

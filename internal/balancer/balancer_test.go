@@ -53,24 +53,24 @@ func TestBackendBalancerEmptyPool(t *testing.T) {
 	if bb.Select() != nil {
 		t.Fatal("select on empty pool should be nil")
 	}
-	if bb.SelectToolCall() != nil {
+	if bb.SelectFromTag("tool_call") != nil {
 		t.Fatal("select tool_call on empty pool should be nil")
 	}
 }
 
-// TestSelectToolCall 验证 tool_call 子池：只选 tool_call: true 的后端，
+// TestSelectToolCall 验证 tool_call 子池：只选带 tool_call 标签的后端，
 // 且子池随 Update 重建。
 func TestSelectToolCall(t *testing.T) {
 	backends := []config.BackendConfig{
-		{Name: "a", URL: "http://a:8080", Weight: 1, ToolCall: true},
-		{Name: "b", URL: "http://b:8080", Weight: 1, ToolCall: true},
+		{Name: "a", URL: "http://a:8080", Weight: 1, Tags: []string{"tool_call"}},
+		{Name: "b", URL: "http://b:8080", Weight: 1, Tags: []string{"tool_call"}},
 		{Name: "c", URL: "http://c:8080", Weight: 1}, // 不支持工具调用
 	}
 	bb := New(backends, "rr")
 
 	counts := map[string]int{}
 	for i := 0; i < 20; i++ {
-		b := bb.SelectToolCall()
+		b := bb.SelectFromTag("tool_call")
 		if b == nil {
 			t.Fatal("select tool_call returned nil")
 		}
@@ -88,16 +88,16 @@ func TestSelectToolCall(t *testing.T) {
 	}
 
 	// 子池随 Update 重建：只剩 c 且支持工具调用
-	bb.Update([]config.BackendConfig{{Name: "c", URL: "http://c:8080", Weight: 1, ToolCall: true}})
+	bb.Update([]config.BackendConfig{{Name: "c", URL: "http://c:8080", Weight: 1, Tags: []string{"tool_call"}}})
 	for i := 0; i < 5; i++ {
-		if b := bb.SelectToolCall(); b == nil || b.Name != "c" {
+		if b := bb.SelectFromTag("tool_call"); b == nil || b.Name != "c" {
 			t.Fatalf("after update select tool_call=%v, want c", b)
 		}
 	}
 
 	// 池中没有任何 tool_call 后端时返回 nil
 	bb.Update([]config.BackendConfig{{Name: "c", URL: "http://c:8080", Weight: 1}})
-	if bb.SelectToolCall() != nil {
+	if bb.SelectFromTag("tool_call") != nil {
 		t.Fatal("expected nil when no tool_call backend")
 	}
 }
@@ -129,28 +129,28 @@ func TestSelectExcluding(t *testing.T) {
 }
 
 // TestSelectToolCallExcluding 验证 tool_call 子池的排除选点：跳过已排除后端，
-// 且不选中不支持工具调用的后端；子池全部排除时返回 nil。
+// 且不选中不带 tool_call 标签的后端；子池全部排除时返回 nil。
 func TestSelectToolCallExcluding(t *testing.T) {
 	backends := []config.BackendConfig{
-		{Name: "a", URL: "http://a:8080", Weight: 1, ToolCall: true},
-		{Name: "b", URL: "http://b:8080", Weight: 1, ToolCall: true},
+		{Name: "a", URL: "http://a:8080", Weight: 1, Tags: []string{"tool_call"}},
+		{Name: "b", URL: "http://b:8080", Weight: 1, Tags: []string{"tool_call"}},
 		{Name: "c", URL: "http://c:8080", Weight: 1}, // 不支持工具调用
 	}
 	bb := New(backends, "rr")
-	first := bb.SelectToolCall()
+	first := bb.SelectFromTag("tool_call")
 	if first == nil {
 		t.Fatal("first tool_call select returned nil")
 	}
 	for i := 0; i < 10; i++ {
-		got := bb.SelectToolCallExcluding(map[string]bool{first.Name: true})
+		got := bb.SelectFromTagExcluding("tool_call", map[string]bool{first.Name: true})
 		if got == nil {
 			t.Fatalf("select tool_call excluding returned nil (excluded %s)", first.Name)
 		}
-		if got.Name == first.Name || !got.ToolCall {
+		if got.Name == first.Name || !got.EffectiveTags()["tool_call"] {
 			t.Fatalf("bad selection: %+v", got)
 		}
 	}
-	if got := bb.SelectToolCallExcluding(map[string]bool{"a": true, "b": true}); got != nil {
+	if got := bb.SelectFromTagExcluding("tool_call", map[string]bool{"a": true, "b": true}); got != nil {
 		t.Fatalf("expected nil when all tool_call backends excluded, got %s", got.Name)
 	}
 }
@@ -159,7 +159,7 @@ func TestSelectToolCallExcluding(t *testing.T) {
 func TestSelectFromTag(t *testing.T) {
 	backends := []config.BackendConfig{
 		{Name: "a", URL: "http://a:8080", Weight: 1, Tags: []string{"fast"}},
-		{Name: "b", URL: "http://b:8080", Weight: 1, ToolCall: true, Tags: []string{"fast"}},
+		{Name: "b", URL: "http://b:8080", Weight: 1, Tags: []string{"fast", "tool_call"}},
 		{Name: "c", URL: "http://c:8080", Weight: 1},
 	}
 	bb := New(backends, "rr")
@@ -179,7 +179,7 @@ func TestSelectFromTag(t *testing.T) {
 		t.Fatalf("non-fast backend c was selected: %v", counts)
 	}
 
-	// tool_call: true 等价于含 tool_call 标签
+	// tool_call 标签后端进入 tool_call 子池
 	if b := bb.SelectFromTag("tool_call"); b == nil || b.Name != "b" {
 		t.Fatalf("select tool_call=%v, want b", b)
 	}
@@ -198,7 +198,7 @@ func TestSelectFromTag(t *testing.T) {
 	// 子池随 Update 重建：a 去掉标签后出池
 	bb.Update([]config.BackendConfig{
 		{Name: "a", URL: "http://a:8080", Weight: 1},
-		{Name: "b", URL: "http://b:8080", Weight: 1, ToolCall: true, Tags: []string{"fast"}},
+		{Name: "b", URL: "http://b:8080", Weight: 1, Tags: []string{"fast", "tool_call"}},
 	})
 	for i := 0; i < 5; i++ {
 		if b := bb.SelectFromTag("fast"); b == nil || b.Name != "b" {
@@ -212,7 +212,7 @@ func TestPoolSummary(t *testing.T) {
 	var lines []string
 	backends := []config.BackendConfig{
 		{Name: "a", URL: "http://a:8080", Weight: 5, Tags: []string{"fast"}},
-		{Name: "b", URL: "http://b:8080", Weight: 3, ToolCall: true, Tags: []string{"fast"}},
+		{Name: "b", URL: "http://b:8080", Weight: 3, Tags: []string{"fast", "tool_call"}},
 		{Name: "c", URL: "http://c:8080", Weight: 1},
 	}
 	bb := New(backends, "wrr")

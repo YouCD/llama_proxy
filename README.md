@@ -8,7 +8,7 @@
 
 本地 `llama.cpp` / OpenAI 兼容推理服务器的轻量级反向代理 + 监控面板。
 
-`llama_proxy` 部署在推理服务器前面：记录每一个请求与响应（含原始载荷）、测量 TTFT / 总耗时 / Token 吞吐，并提供一个实时刷新的 Web 面板。除纯转发外，还支持**进程调度模式**——由代理自动启停本地 `llama-server` 进程，按请求头区分开发（coding）流量与日常流量，并把本地 background 模型作为动态节点纳入代理池做负载均衡。
+`llama_proxy` 部署在推理服务器前面：记录每一个请求与响应（含原始载荷）、测量 TTFT / 总耗时 / Token 吞吐，并提供一个实时刷新的 Web 面板。除纯转发外，还支持**进程调度模式**——由代理自动启停本地 `llama-server` 进程，按请求体中的模型 ID 区分开发（coding）流量与日常流量，并把本地 background 模型作为动态节点纳入代理池做负载均衡。
 
 ![llama_proxy](./docs/logo.svg)
 
@@ -34,53 +34,62 @@ English UI：
 - 记录每个请求的原始请求体 / 响应体（按日期 gzip 存储）
 - 指标：活跃连接、TTFT、总耗时、prompt/completion Token 数、Token 吞吐（prompt/s、generation/s）、缓存命中率、请求/响应大小、错误
 - 多后端加权负载均衡（wrr / swrr / wr / rr / random，基于 [fufuok/balancer](https://github.com/fufuok/balancer)）
-- 客户端特征路由规则（`routing`）：按 User-Agent / 请求头匹配，把请求固定到后端标签池并池内自动故障转移
+- 按请求模型 ID 路由：`llm_prox` 轮询模型列表；具体模型 ID 直连部署该模型的后端/本地进程（启动时校验模型 ID 全局唯一）
+- 客户端特征路由规则（`routing`）：按 User-Agent（包含匹配）/ 请求头（精确匹配）把 `llm_prox` 流量固定到后端标签池并池内自动故障转移
 - 每后端 `model` 重写与 `api_key` 注入，客户端 key 与后端 key 相互隔离
-- 可选进程调度：自动启停本地 `llama-server`，按请求头识别 coding 流量，background 模型就绪时作为动态节点入池
+- 可选进程调度：自动启停本地 `llama-server`，按请求模型 ID 识别 coding 流量，background 模型就绪时作为动态节点入池
 - Web 面板（中/英双语）：实时指标卡、进程调度状态、按后端统计、每日统计图、可过滤的请求列表与请求详情
 - SQLite（默认）或 PostgreSQL 存储，数据保留期自动清理
 
 ## 路由模型
 
-不配置 `scheduling` 时是**纯转发模式**：未命中路由规则的请求在 `backends.list` 中按权重策略分发（路由规则见下文）。
+代理按请求体中的 `model` 字段分派流量：
 
-配置 `scheduling` 后进入**进程调度模式**：
+| 请求 model | 去向 |
+|---|---|
+| `llm_prox`（或省略） | 默认轮询模型列表：命中路由规则时进入规则 pool 子池，否则进入全量代理池（`backends.list` + 就绪的本地 background 节点），按权重策略负载均衡 |
+| `scheduling.coding.model` | 本地 coding 进程（未启动时自动拉起并等待就绪，并续期开发租约） |
+| `scheduling.background.model` | 本地 background 进程（就绪时即代理池中的 `local-background` 节点直连；未就绪时自动拉起并等待；coding 租约仍活跃时进程被占用，返回 503） |
+| `backends.list[].model` | 直连部署该模型的后端（单后端，不故障转移） |
+| 未配置的其他模型 ID | 400 错误 |
 
-| 请求 | 条件 | 去向 |
-|---|---|---|
-| coding（请求头 `X-LLM-Purpose: coding` 完全匹配） | 任意时刻 | 本地 coding 进程（未启动时自动拉起并等待就绪） |
-| 非 coding | background 就绪 | 代理池 = `backends.list` + 本地 background 节点，按权重负载均衡 |
-| 非 coding | coding 进行中 / background 未就绪 / 进程崩溃 | 代理池 = `backends.list` |
-| 非 coding，带 `X-Backend-URL` 头或 `?backend=` 参数 | `backends.allow_dynamic: true` | 直连指定后端 |
+**模型 ID 唯一性**：启动时校验所有模型 ID（`backends.list[].model` 与 `scheduling.coding/background.model`）互不重复，且不与 `llm_prox` 冲突；重复时拒绝启动，保证具体模型路由无歧义。
+
+配置 `scheduling` 后进入**进程调度模式**，`llm_prox` 流量的代理池构成：
+
+| 条件 | 代理池 |
+|---|---|
+| background 就绪 | `backends.list` + 本地 background 节点，按权重负载均衡 |
+| coding 进行中 / background 未就绪 / 进程崩溃 | `backends.list` |
 
 调度细节：
 
-- **coding 进程**：收到 coding 流量时由代理按 `scheduling.coding.command` 启动 `llama-server`，轮询 `readiness_url` 直到就绪；客户端请求期间代理注入该进程自己的 `api_key`。
-- **租约**：距最后一次 coding 流量超过 `scheduling.lease.coding_idle_timeout`（例 30m）后，代理优雅停掉 coding 进程并切回 background，避免大模型常驻占用显存。
+- **coding 进程**：收到 coding 模型流量时由代理按 `scheduling.coding.command` 启动 `llama-server`，轮询 `readiness_url` 直到就绪；客户端请求期间代理注入该进程自己的 `api_key`。
+- **租约**：距最后一次 coding 模型流量超过 `scheduling.lease.coding_idle_timeout`（例 30m）后，代理优雅停掉 coding 进程并切回 background，避免大模型常驻占用显存。
 - **background 节点**：常驻运行（或由代理拉起）。就绪探测通过后以 `scheduling.background.weight`（缺省 1）作为名为 `local-background` 的动态节点加入代理池参与负载均衡；探测失败或进程意外退出时自动出池，恢复就绪后重新入池。
 - **切换**：停旧进程前按 `switch.drain_timeout` 优雅排空在途请求，`kill_timeout` 内未退出则强杀；新进程按 `startup_timeout` 等待就绪。
+- **优先级抢占**：coding > background。background 加载（或空闲切回）期间收到 coding 模型流量时，coding 切换直接抢占在途的 background 切换（取消其就绪等待）并立即开始加载 coding，而不是排队等 background 加载完成——两者共用同一端口，background 本来就要先被杀掉；启动时首次 background 加载被抢占不视为致命错误。反之，coding 租约仍活跃时 background 切换会被跳过，不会杀掉正在使用的 coding 进程。
 
 ### 路由规则（routing）
 
-两种模式下都可以配置 `routing.rules`，把特定客户端特征的请求固定到指定标签池：
+路由规则只作用于 `llm_prox`（默认池）流量，具体模型 ID 直连不受规则影响。规则把特定客户端特征的请求固定到指定标签池：
 
 - 规则按配置顺序评估，**首条命中生效**；
-- 每条规则的 `match` 支持 `user_agent_contains`（忽略大小写的子串）与 `header`（任一请求头与配置值完全匹配），多条件同时配置时为 AND；
-- 命中后请求只从标签与 `pool` 匹配的后端中选择（`backends.list[].tags` 与 `tool_call: true` 的并集，本地 background 节点可用 `scheduling.background.tags` 携带标签），动态覆盖（`X-Backend-URL` / `?backend=`）不生效；请求失败时自动转移到同一标签池内下一个未尝试的后端；
-- 未配置 `routing` 时回退到内置规则：User-Agent 含 `GoClaw` → `tool_call` 池（与既有 GoClaw 路由行为一致）。
+- 每条规则的 `header` 中所有请求头都必须匹配（AND）：**User-Agent 采用包含匹配**（不区分大小写的子串包含，配置 `GoClaw` 可命中 `GoClaw/2.1 (Windows)`），其余请求头 trim 后精确相等、区分大小写；
+- 命中后请求只从 `tags` 含 `pool` 标签的后端中选择（本地 background 节点可用 `scheduling.background.tags` 携带标签）；请求失败时自动转移到同一标签池内下一个未尝试的后端；
+- 未配置 `routing` 时不存在路由规则，全部流量走默认池。
 
 ```yaml
 routing:
   rules:
     - name: "goclaw"
-      match:
-        user_agent_contains: "GoClaw"
+      header:
+        User-Agent: "GoClaw"   # UA 包含该子串即命中（不区分大小写）
       pool: "tool_call"
-    - name: "agent-x"            # 多条件 AND：UA 命中 且 任一 header 完全匹配
-      match:
-        user_agent_contains: "AgentX"
-        header:
-          X-Agent-Env: "prod"
+    - name: "agent-x"              # 多条件 AND：User-Agent 包含 + X-Agent-Env 精确匹配
+      header:
+        User-Agent: "AgentX"
+        X-Agent-Env: "prod"
       pool: "fast"
 
 backends:
@@ -90,7 +99,7 @@ backends:
       tags: ["fast"]             # 加入 fast 标签池
     - name: "gpu-server-2"
       url: "http://gpu-server-2:8080"
-      tool_call: true            # 等价于 tags 含 "tool_call"
+      tags: ["tool_call"]        # 加入 tool_call 子池
 ```
 
 ## Quick Start
@@ -204,7 +213,7 @@ server:
   data_dir: "./data"
   # 面板 Host 白名单（忽略端口与大小写），留空不限制；不在列表内的 Host 访问面板返回 403
   ui_allowed_hosts:
-    - "llm.youcd.online"
+    - "llm.youcd.online"  # 忽略端口，"llm.youcd.online:9091" 也命中
 
 database:
   type: "sqlite"                # sqlite | postgresql
@@ -217,7 +226,6 @@ database:
     conn_max_lifetime_seconds: 300
 
 backends:
-  allow_dynamic: true           # 允许 X-Backend-URL / ?backend= 逐请求覆盖
   strategy: "wrr"               # wrr | swrr | wr | rr | random
   list:
     - name: "gpu-server-1"
@@ -226,7 +234,8 @@ backends:
       enabled: true
       model: "qwen"             # 后端实际部署的模型 ID，转发时自动重写请求体 model 字段
       api_key: "secret-1"       # 后端 API Key，转发时自动注入 Authorization: Bearer <key>
-      # tags: ["fast"]          # 可选：加入的路由标签池，routing 规则按 pool 标签选择该后端
+      # tags: ["fast"]          # 可选：加入的路由标签池，routing 规则按 pool 标签选择该后端；
+                                 # 含 "tool_call" 即加入 tool_call 子池
     - name: "gpu-server-2"
       url: "http://gpu-server-2:8080"
       weight: 30
@@ -235,12 +244,12 @@ backends:
       api_key: "secret-2"
 
 # 路由规则（可选）：把特定客户端特征的请求固定到指定标签池，首条命中生效；
-# 未配置时回退到内置规则：User-Agent 含 "GoClaw" → tool_call 池
+# 未配置时不存在路由规则，全部流量走默认池
 #routing:
 #  rules:
 #    - name: "goclaw"
-#      match:
-#        user_agent_contains: "GoClaw"
+#      header:
+#        User-Agent: "GoClaw"   # UA 包含该子串即命中（不区分大小写）
 #      pool: "tool_call"
 
 proxy:
@@ -257,7 +266,9 @@ proxy:
     - "/v1/completions"
     - "/v1/embeddings"
 
-# 进程调度（可选）：配置后启用 coding 流量识别 + 本地模型进程切换，未配置则保持纯转发模式
+# 进程调度（可选）：配置后启用模型 ID 驱动的本地进程切换，未配置则保持纯转发模式。
+# coding/background 的 model（请求该模型 ID 即路由到该进程）与 readiness_url 必填；
+# 所有模型 ID 启动时校验全局唯一，且不与 llm_prox 冲突
 scheduling:
   coding:
     # command 支持多行：每个参数一行，拼接为一行命令执行（块内不可用 # 注释）
@@ -265,9 +276,9 @@ scheduling:
       /usr/local/bin/llama-server
       -m /path/to/coding.gguf
       --host 0.0.0.0 --port 8080 -c 8192
-    header:
-      "X-LLM-Purpose": "coding"   # 请求头与该值完全匹配即判定为 coding 流量
-    readiness_url: "http://127.0.0.1:8080/v1/models"  # 就绪探测地址（完全按此配置 GET）
+      --alias qwen3.8
+    model: "qwen3.8"                     # 请求体 model 为该值即路由到 coding 进程并续期租约
+    readiness_url: "http://127.0.0.1:8080/v1/models"  # 就绪探测地址（必填，完全按此配置 GET）
     api_key: "your-api-key"       # 模型进程自身的 API Key（对应 llama-server --api-key）
     log_file: "./data/coding.log" # 可选：该进程 stdout/stderr 日志
   background:
@@ -275,7 +286,9 @@ scheduling:
       /usr/local/bin/llama-server
       -m /path/to/background.gguf
       --host 0.0.0.0 --port 8080 -c 8192
-    readiness_url: "http://127.0.0.1:8080/v1/models"
+      --alias qwen3.6
+    model: "qwen3.6"                     # 请求体 model 为该值即路由到本地 background 进程
+    readiness_url: "http://127.0.0.1:8080/v1/models"  # 必填
     api_key: "your-api-key"
     weight: 1   # 就绪后作为动态节点加入代理池的权重，与 backends.list 一起负载均衡，缺省 1
     log_file: "./data/background.log"
@@ -299,18 +312,6 @@ scheduling:
 - `backends.list[].api_key` / `scheduling.*.api_key`：转发到对应后端时自动注入该后端的 key；未配置则客户端的 `Authorization` 头原样透传。
 - `backends.list[].model`：配置后转发前自动重写请求体中的 `model` 字段为该后端实际部署的模型 ID，客户端无需关心各后端模型名不一致的问题。
 
-### 逐请求后端覆盖
-
-`backends.allow_dynamic: true` 时，以下两种方式优先级高于负载均衡：
-
-```text
-X-Backend-URL: http://host.docker.internal:8081
-```
-
-```text
-?backend=http://host.docker.internal:8081
-```
-
 ## Web 面板
 
 访问 `http://<host>:<port>/_proxy/ui`（中/英双语，右上角切换），通过 SSE 实时推送更新，支持自动刷新：
@@ -325,7 +326,7 @@ X-Backend-URL: http://host.docker.internal:8081
 
 ## API 端点
 
-监控端点均位于 `/_proxy` 前缀下，其余路径按代理转发处理（`/v1/models` 由代理自身应答，不转发）。
+监控端点均位于 `/_proxy` 前缀下，其余路径按代理转发处理（`/v1/models` 由代理自身应答：返回 `llm_prox` 与全部已配置的具体模型 ID，不转发）。
 
 ```text
 GET    /_proxy/                          服务信息与端点列表

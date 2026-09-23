@@ -145,6 +145,20 @@ body {
   padding: 16px;
   margin-bottom: 16px;
   box-shadow: var(--app-card-shadow);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transform: translateY(0);
+}
+
+/* 白色主题下面板悬停：虚影 + 抬起效果 */
+html:not(.dark) .panel {
+  box-shadow: 0 4px 8px rgba(16, 24, 40, 0.08),
+              0 1px 2px rgba(16, 24, 40, 0.06);
+}
+html:not(.dark) .panel:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 16px 32px rgba(16, 24, 40, 0.15),
+              0 4px 8px rgba(16, 24, 40, 0.08);
 }
 
 .section-title {
@@ -203,6 +217,20 @@ body {
   padding: 10px 14px;
   text-align: center;
   box-shadow: var(--app-card-shadow);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transform: translateY(0);
+}
+
+/* 白色主题下卡片悬停：虚影 + 抬起效果 */
+html:not(.dark) .stat-card {
+  box-shadow: 0 4px 8px rgba(16, 24, 40, 0.08),
+              0 1px 2px rgba(16, 24, 40, 0.06);
+}
+html:not(.dark) .stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px rgba(16, 24, 40, 0.12),
+              0 4px 8px rgba(16, 24, 40, 0.06);
 }
 
 /* 一级核心指标：强调描边，降低“运维感” */
@@ -336,9 +364,21 @@ body {
   border: 1px solid var(--app-line);
   border-radius: var(--app-radius, 12px);
   cursor: pointer;
-  transition: border-color 0.15s;
+  transition: border-color 0.15s, transform 0.2s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transform: translateY(0);
 }
-.backend-bar:hover {
+html:not(.dark) .backend-bar {
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.06),
+              0 1px 2px rgba(16, 24, 40, 0.04);
+}
+html:not(.dark) .backend-bar:hover {
+  border-color: var(--app-accent);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(16, 24, 40, 0.1),
+              0 2px 4px rgba(16, 24, 40, 0.06);
+}
+html.dark .backend-bar:hover {
   border-color: var(--app-accent);
 }
 

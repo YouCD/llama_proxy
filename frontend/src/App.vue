@@ -10,14 +10,6 @@
           </div>
         </div>
         <div class="header-actions">
-          <span :class="'live-dot ' + liveState"></span>
-          <span>{{ liveText }}</span>
-          <span class="cell-subtle">{{ t('lastUpdate') }} {{ lastUpdated }}</span>
-          <span style="display: inline-flex; align-items: center; gap: 6px">
-            <el-switch v-model="autoRefresh"/>
-            <span class="cell-subtle">{{ t('autoRefresh') }}</span>
-          </span>
-          <el-button :icon="Refresh" @click="refreshNow" round>{{ t('refresh') }}</el-button>
           <span class="lang-btn" :title="t('themeToggle')" @click="toggleTheme">
             <span class="lang-icon">{{ currentTheme === 'dark' ? '☀️' : '🌙' }}</span>
           </span>
@@ -142,9 +134,7 @@ const quickCounts = computed(() => {
   return c
 })
 
-let refreshTimer = null
 let eventSource = null
-let pollTimers = []
 
 function setLive(mode, text) {
   liveState.value = mode
@@ -301,20 +291,29 @@ function onLangCommand(lang) {
   setLang(lang)
 }
 
-function scheduleEventRefresh() {
-  if (!autoRefresh.value) return
-  if (refreshTimer) clearTimeout(refreshTimer)
-  refreshTimer = setTimeout(() => {
-    refreshAll().catch(() => {
-    })
-  }, 180)
-}
-
 function connectEvents() {
   eventSource = new EventSource(`${API_PROXY}events`)
   eventSource.onopen = () => setLive('live', t('liveConnected'))
   eventSource.onerror = () => setLive('retry', t('reconnecting'))
-  eventSource.addEventListener('request', scheduleEventRefresh)
+  // 监听不同事件类型，直接更新对应数据
+  eventSource.addEventListener('stats', (e) => {
+    const data = JSON.parse(e.data)
+    Object.keys(stats).forEach((k) => delete stats[k])
+    Object.assign(stats, data)
+    lastUpdated.value = fmtDate(new Date().toISOString())
+  })
+  eventSource.addEventListener('llmStats', (e) => {
+    const data = JSON.parse(e.data)
+    Object.keys(llmStats).forEach((k) => delete llmStats[k])
+    Object.assign(llmStats, data)
+  })
+  eventSource.addEventListener('request', (e) => {
+    // 请求事件：刷新请求列表
+    loadRequests().catch(() => {})
+  })
+  eventSource.addEventListener('scheduler', (e) => {
+    scheduler.value = JSON.parse(e.data)
+  })
 }
 
 function refreshNow() {
@@ -326,29 +325,10 @@ onMounted(async () => {
   connectEvents()
   await refreshAll()
   await loadOptions()
-  pollTimers = [
-    setInterval(() => {
-      if (autoRefresh.value) loadStats().catch(() => {
-      })
-    }, 5000),
-    setInterval(() => {
-      if (autoRefresh.value) loadRequests().catch(() => {
-      })
-    }, 9000),
-    setInterval(() => {
-      loadOptions().catch(() => {
-      })
-    }, 30000),
-    setInterval(() => {
-      loadScheduler().catch(() => {
-      })
-    }, 5000),
-  ]
+  // 不再使用轮询定时器，所有数据更新由 SSE 事件驱动
 })
 
 onUnmounted(() => {
   if (eventSource) eventSource.close()
-  if (refreshTimer) clearTimeout(refreshTimer)
-  pollTimers.forEach((timer) => clearInterval(timer))
 })
 </script>

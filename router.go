@@ -140,7 +140,6 @@ func (s *Server) apiStatsByBackend(c *gin.Context) {
 
 // enrichBackendMeta 给统计条目附带配置中的部署模型与路由标签，
 // 供面板在后端地址下方展示“部署了哪些模型、属于哪些路由池”。
-// 动态后端（allow_dynamic）无配置项，不受影响。
 func (s *Server) enrichBackendMeta(items []map[string]any) {
 	if s.yamlCfg == nil || len(items) == 0 {
 		return
@@ -251,7 +250,7 @@ func (s *Server) apiRequest(c *gin.Context) {
 			httpx.WriteJSON(c.Writer, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
-		s.hub.Broadcast(map[string]any{"kind": "request_deleted", "id": id, "time": time.Now().UTC()})
+		s.hub.BroadcastWithType("request", map[string]any{"deleted": true, "id": id, "time": time.Now().UTC()})
 		httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{"status": "deleted", "id": id})
 		return
 	}
@@ -384,7 +383,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case msg := <-ch:
-			_, _ = fmt.Fprintf(w, "event: request\ndata: %s\n\n", msg)
+			_, _ = fmt.Fprintf(w, "%s\n", msg)
 			flusher.Flush()
 		case <-heartbeat.C:
 			_, _ = w.Write([]byte(": keepalive\n\n"))
@@ -434,8 +433,9 @@ func (s *Server) schedulerStatus() map[string]any {
 }
 
 // handleModels 让路由器自身应答 OpenAI 兼容的 GET /v1/models。
-// 固定返回一个占位模型 llm_prox，供客户端作为可用模型 ID 使用；
-// 实际转发时仍走负载均衡，接受客户端提交的任意模型名。不转发到后端，也不记录。
+// 返回占位模型 llm_prox（轮询模型列表）与所有已配置的具体模型 ID（backends.list
+// 与本地调度进程）：请求 llm_prox 走负载均衡，请求具体模型 ID 直连对应后端/进程。
+// 不转发到后端，也不记录。
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	type obj struct {
 		ID      string `json:"id"`
@@ -443,10 +443,31 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		Created int64  `json:"created"`
 		OwnedBy string `json:"owned_by"`
 	}
+	now := time.Now().Unix()
+	ids := []string{ProxyModelID}
+	seen := map[string]bool{ProxyModelID: true}
+	if s.yamlCfg != nil {
+		add := func(id string) {
+			id = strings.TrimSpace(id)
+			if id != "" && !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+		for i := range s.yamlCfg.Backends.List {
+			add(s.yamlCfg.Backends.List[i].Model)
+		}
+		if sc := s.yamlCfg.Scheduling; sc != nil {
+			add(sc.Coding.Model)
+			add(sc.Background.Model)
+		}
+	}
+	data := make([]obj, 0, len(ids))
+	for _, id := range ids {
+		data = append(data, obj{ID: id, Object: "model", Created: now, OwnedBy: "llama_proxy"})
+	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data": []obj{
-			{ID: "llm_prox", Object: "model", Created: time.Now().Unix(), OwnedBy: "llama_proxy"},
-		},
+		"data":   data,
 	})
 }

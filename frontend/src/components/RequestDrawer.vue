@@ -101,12 +101,6 @@
             <pre class="json-view" v-html="highlightJSON(rawResp)"></pre>
           </div>
         </el-tab-pane>
-        <el-tab-pane :label="t('tabStructured')" name="structured">
-          <div class="code-block">
-            <button class="code-copy" :title="t('copyJson')" @click="copyJson(rawResp)">📋</button>
-            <pre class="json-view" v-html="highlightJSON(rawResp)"></pre>
-          </div>
-        </el-tab-pane>
       </el-tabs>
     </div>
   </el-drawer>
@@ -538,7 +532,7 @@ async function onDelete() {
   border-color: var(--app-cyan);
 }
 .json-view {
-  background: #0d1117;
+  background: var(--json-bg, #0d1117);
   border: 1px solid var(--app-line);
   border-radius: 6px;
   padding: 12px 12px 12px 0;
@@ -550,24 +544,30 @@ async function onDelete() {
   white-space: pre;
   margin: 0;
 }
-.json-view :deep(.jk) {
-  color: #7dd3fc;
+
+/* 浅色主题下 JSON 背景更亮 */
+html:not(.dark) .json-view {
+  --json-bg: #f8f9fa;
 }
-.json-view :deep(.js) {
-  color: #4ade80;
-}
-.json-view :deep(.jn) {
-  color: #fb923c;
-}
-.json-view :deep(.jb) {
-  color: #9da7b1;
-}
+
+/* 深色主题 JSON 高亮（保持原样） */
+html.dark .json-view :deep(.jk) { color: #7dd3fc; }
+html.dark .json-view :deep(.js) { color: #4ade80; }
+html.dark .json-view :deep(.jn) { color: #fb923c; }
+html.dark .json-view :deep(.jb) { color: #9da7b1; }
+
+/* 浅色主题 JSON 高亮 */
+html:not(.dark) .json-view :deep(.jk) { color: #2563eb; }
+html:not(.dark) .json-view :deep(.js) { color: #16a34a; }
+html:not(.dark) .json-view :deep(.jn) { color: #d97706; }
+html:not(.dark) .json-view :deep(.jb) { color: #6b7280; }
+
 .json-view :deep(.ln) {
   display: inline-block;
   width: 2.6em;
   text-align: right;
   margin-right: 12px;
-  color: #484f58;
+  color: var(--app-muted);
   user-select: none;
   font-variant-numeric: tabular-nums;
 }

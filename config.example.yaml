@@ -19,7 +19,6 @@ database:
     conn_max_lifetime_seconds: 300
 
 backends:
-  allow_dynamic: true
   strategy: "wrr"  # wrr, swrr, wr, rr, random
   list:
     - name: "gpu-server-1"
@@ -28,8 +27,8 @@ backends:
       enabled: true
       model: "qwen"          # 该后端实际部署的模型 ID，转发时自动重写请求体的 model 字段
       api_key: "secret-1"    # 该后端的 API Key，转发时自动注入 Authorization: Bearer <key>
-      # tags: ["fast"]       # 可选：加入的路由标签池，routing 规则按 pool 标签选择后端
-      # tool_call: true      # 可选：该后端支持工具调用（等价于 tags 含 "tool_call"）
+      # tags: ["fast"]       # 可选：加入的路由标签池，routing 规则按 pool 标签选择后端；
+                              # 含 "tool_call" 即加入 tool_call 子池
     - name: "gpu-server-2"
       url: "http://gpu-server-2:8080"
       weight: 30
@@ -41,21 +40,22 @@ backends:
       weight: 20
       enabled: true
 
-# 路由规则（可选）：按客户端特征把请求固定到指定标签池，规则按顺序评估、首条命中生效。
-# 命中规则的请求：只从 pool 标签对应的后端子池（tags 或 tool_call 命中该标签）中选择，
-# 动态覆盖（X-Backend-URL / ?backend=）不生效，请求失败时自动转移到子池内下一个后端。
-# 未配置时回退到内置规则：User-Agent 含 "GoClaw" → tool_call 池（保持既有行为）。
+# 路由规则（可选）：按客户端特征把请求固定到指定标签池，规则按顺序评估、首条命中生效；
+# 未配置时不存在路由规则，全部流量走默认池。
+# header 内每个请求头都必须匹配（AND）：User-Agent 采用包含匹配（不区分大小写的子串包含），
+# 其余请求头 trim 后精确相等、区分大小写。
+# 命中规则的请求：只从 pool 标签对应的后端子池（tags 含该标签）中选择，
+# 请求失败时自动转移到子池内下一个后端。
 #routing:
 #  rules:
 #    - name: "goclaw"                      # 规则名，仅用于日志与报错
-#      match:
-#        user_agent_contains: "GoClaw"     # User-Agent 包含该子串（忽略大小写）
-#      pool: "tool_call"                   # 只路由到携带 tool_call 标签的后端
-#    - name: "agent-x"                     # 多条件 AND：UA 命中 且 任一 header 完全匹配
-#      match:
-#        user_agent_contains: "AgentX"
-#        header:
-#          X-Agent-Env: "prod"
+#      header:
+#        User-Agent: "GoClaw"             # User-Agent 包含该子串即命中（不区分大小写）
+#      pool: "tool_call"                   # 只路由到 tags 含 "tool_call" 的后端
+#    - name: "agent-x"                     # 多条件 AND：两个请求头都必须完全匹配
+#      header:
+#        User-Agent: "AgentX/1.0"
+#        X-Agent-Env: "prod"
 #      pool: "fast"
 
 proxy:
@@ -72,18 +72,20 @@ proxy:
     - "/v1/completions"
     - "/v1/embeddings"
 
-# 进程调度（可选）：配置后启用"开发流量识别 + 模型进程切换"，未配置则保持纯转发模式。
-# 开启后：开发(coding)流量转发到本地 coding 进程；非开发流量统一进入代理池
-# （backends.list + 本地 background 节点，后者就绪时入池参与负载均衡，未就绪时出池）。
+# 进程调度（可选）：配置后启用"模型 ID 驱动的模型进程切换"，未配置则保持纯转发模式。
+# 开启后：请求 coding 固化模型 ID 的流量转发到本地 coding 进程（未启动时自动拉起）；
+# 非 coding 流量统一进入代理池（backends.list + 本地 background 节点，后者就绪时入池参与
+# 负载均衡，未就绪时出池）。所有模型 ID（backends.list 与 scheduling）必须全局唯一，
+# 启动时校验，重复则拒绝启动。
 #scheduling:
 #  coding:
+#    # 固化模型 ID：请求该模型 ID 时自动启动/切换到 coding 进程（模型 ID 全局唯一）
+#    model: "coding-model"
 #    # command 支持多行：每个参数一行，最终拼接为一行命令执行。注意块内不可用 # 注释。
 #    command: >
 #      /usr/local/bin/llama-server
 #      -m /path/to/coding.gguf
 #      --host 0.0.0.0 --port 8080 -c 8192
-#    header:
-#      "X-LLM-Purpose": "coding"   # 请求头与该值完全匹配即判定为开发流量
 #    # 就绪探测地址：完全按此配置发起 GET（不拼接路径）。
 #    readiness_url: "http://127.0.0.1:8080/v1/models"
 #    # 模型进程自身的 API Key（对应 llama-server 的 --api-key）：
@@ -91,6 +93,8 @@ proxy:
 #    api_key: "your-api-key"
 #    log_file: "./data/coding.log"     # 可选：该模型进程的 stdout/stderr 日志文件
 #  background:
+#    # 固化模型 ID：请求该模型 ID 时自动启动/切换到 background 进程（模型 ID 全局唯一）
+#    model: "background-model"
 #    command: >
 #      /usr/local/bin/llama-server
 #      -m /path/to/background.gguf
@@ -101,7 +105,7 @@ proxy:
 #    tags: ["fast"]  # 可选：该节点入池后携带的路由标签（routing 规则的 pool 可与之对应）
 #    log_file: "./data/background.log" # 可选：该模型进程的 stdout/stderr 日志文件
 #  lease:
-#    # 距最后一次开发流量超过该时长即切回 background 模型
+#    # 距最后一次 coding 模型流量超过该时长即切回 background 模型
 #    coding_idle_timeout: 30m
 #  switch:
 #    drain_timeout: 10s     # 切换前优雅排空在途请求的等待上限

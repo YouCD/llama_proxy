@@ -15,6 +15,7 @@ import (
 	"llama_proxy/internal/config"
 	"llama_proxy/internal/db"
 	"llama_proxy/internal/events"
+	"llama_proxy/internal/model"
 	"llama_proxy/internal/scheduler"
 	"llama_proxy/internal/store"
 
@@ -39,8 +40,8 @@ func main() {
 
 	cfg := yamlCfg.ToLegacy()
 	log.SetLogLevel(cfg.LogLevel)
-	if len(yamlCfg.Backends.List) == 0 && !yamlCfg.Backends.AllowDynamic && !yamlCfg.HasScheduling() {
-		log.WithCtx(nil).Fatal("no enabled backend in backends.list and dynamic backend override is disabled")
+	if len(yamlCfg.Backends.List) == 0 && !yamlCfg.HasScheduling() {
+		log.WithCtx(nil).Fatal("no enabled backend in backends.list")
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.WithCtx(nil).Fatalf("mkdir data dir: %v", err)
@@ -128,6 +129,36 @@ func main() {
 		}()
 		go s.scheduler.Loop(ctx)
 		go s.syncLocalBackendNodeLoop(ctx)
+	}
+
+	// 定时广播完整统计快照给 SSE 订阅者，取代前端轮询。
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			// 普通统计
+			stats, err := s.store.GetStats(model.RequestFilter{})
+			if err != nil {
+				continue
+			}
+			s.hub.BroadcastWithType("stats", stats)
+			// LLM 统计（只包含 chat_completions）
+			llmStats, err := s.store.GetStats(model.RequestFilter{ChatCompletionsOnly: true})
+			if err != nil {
+				continue
+			}
+			s.hub.BroadcastWithType("llmStats", llmStats)
+		}
+	}()
+	if s.scheduler != nil {
+		go func() {
+			ticker := time.NewTicker(3 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				status := s.schedulerStatus()
+				s.hub.BroadcastWithType("scheduler", status)
+			}
+		}()
 	}
 
 	backendCount := 0

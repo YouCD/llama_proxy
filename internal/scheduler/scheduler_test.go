@@ -28,42 +28,21 @@ func newTestScheduler(t *testing.T, idle time.Duration) *Scheduler {
 	cfg := &config.SchedulingConfig{
 		Coding: config.ProcessConfig{
 			Command:      "",
-			Header:       map[string]string{"X-LLM-Purpose": "coding"},
+			Model:        "coding-model",
 			ReadinessURL: "http://127.0.0.1:8080",
 			APIKey:       "coding-key",
 		},
 		Background: config.ProcessConfig{
 			Command:      "",
+			Model:        "bg-model",
 			ReadinessURL: "http://127.0.0.1:8080",
 			APIKey:       "bg-key",
 		},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 500 * time.Millisecond}
 	s := New(cfg, idle, sw, &http.Client{})
-	s.SetLogger(func(string, ...any) {})
 	s.SetProbe(fakeProbe(0)) // 立即就绪
 	return s
-}
-
-func TestCodingHeaderMatch(t *testing.T) {
-	s := newTestScheduler(t, time.Hour)
-
-	r, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
-	r.Header.Set("X-LLM-Purpose", "coding")
-	if !s.CodingHeaderMatch(r.Header) {
-		t.Fatal("expected coding match")
-	}
-
-	r2, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
-	r2.Header.Set("X-LLM-Purpose", "other")
-	if s.CodingHeaderMatch(r2.Header) {
-		t.Fatal("unexpected coding match for other purpose")
-	}
-
-	r3, _ := http.NewRequest("POST", "/v1/chat/completions", nil)
-	if s.CodingHeaderMatch(r3.Header) {
-		t.Fatal("unexpected coding match without header")
-	}
 }
 
 func TestStartBackgroundThenEnsureCoding(t *testing.T) {
@@ -149,8 +128,27 @@ func TestCodingActiveStateAfterSwitch(t *testing.T) {
 	if !s.IsCodingActive() {
 		t.Fatal("should be coding active")
 	}
-	if s.CodingHeaderMatch(http.Header{}) {
-		t.Fatal("empty header must not be coding")
+}
+
+// TestEnsureBackground 验证 EnsureBackground 在当前已是 background 模式且就绪时
+// 返回已关闭的就绪 channel，且不影响当前状态。
+func TestEnsureBackground(t *testing.T) {
+	s := newTestScheduler(t, time.Hour)
+	ctx := context.Background()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	ready, err := s.EnsureBackground(ctx)
+	if err != nil {
+		t.Fatalf("ensure background: %v", err)
+	}
+	select {
+	case <-ready:
+	case <-time.After(time.Second):
+		t.Fatal("background ready channel not closed")
+	}
+	if s.mode != modeBackground || s.IsCodingActive() {
+		t.Fatalf("expected background not-coding, got mode=%s codingActive=%v", s.mode, s.IsCodingActive())
 	}
 }
 
@@ -219,12 +217,11 @@ func TestOpenProcessLogEmpty(t *testing.T) {
 
 func TestReconcileReadyAfterStartupTimeout(t *testing.T) {
 	cfg := &config.SchedulingConfig{
-		Coding:     config.ProcessConfig{Command: "sleep 30", Header: map[string]string{"X-LLM-Purpose": "coding"}, ReadinessURL: "http://127.0.0.1:8080"},
+		Coding:     config.ProcessConfig{Command: "sleep 30", Model: "coding-model", ReadinessURL: "http://127.0.0.1:8080"},
 		Background: config.ProcessConfig{Command: "sleep 30", ReadinessURL: "http://127.0.0.1:8080"},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 300 * time.Millisecond}
 	s := New(cfg, time.Hour, sw, &http.Client{})
-	s.SetLogger(func(string, ...any) {})
 	// 先让 probe 一直失败，触发启动超时（readyOK 保持 false）。
 	s.SetProbe(func(context.Context, string) bool { return false })
 	ctx := context.Background()
@@ -266,12 +263,11 @@ func TestWaitReadySendsAuthorization(t *testing.T) {
 	defer server.Close()
 
 	cfg := &config.SchedulingConfig{
-		Coding:     config.ProcessConfig{Command: "", Header: map[string]string{"X-LLM-Purpose": "coding"}, ReadinessURL: server.URL},
+		Coding:     config.ProcessConfig{Command: "", Model: "coding-model", ReadinessURL: server.URL},
 		Background: config.ProcessConfig{Command: "", ReadinessURL: server.URL},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: time.Second}
 	s := New(cfg, time.Hour, sw, server.Client())
-	s.SetLogger(func(string, ...any) {})
 
 	if err := s.waitReady(context.Background(), server.URL, "secret-token", time.Second); err != nil {
 		t.Fatalf("waitReady: %v", err)
@@ -302,12 +298,11 @@ func TestAPIBaseFromReadiness(t *testing.T) {
 
 func TestMarkReadyClosedConcurrent(t *testing.T) {
 	cfg := &config.SchedulingConfig{
-		Coding:     config.ProcessConfig{Command: "sleep 30", Header: map[string]string{"X-LLM-Purpose": "coding"}, ReadinessURL: "http://127.0.0.1:8080"},
+		Coding:     config.ProcessConfig{Command: "sleep 30", Model: "coding-model", ReadinessURL: "http://127.0.0.1:8080"},
 		Background: config.ProcessConfig{Command: "sleep 30", ReadinessURL: "http://127.0.0.1:8080"},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: time.Second}
 	s := New(cfg, time.Hour, sw, &http.Client{})
-	s.SetLogger(func(string, ...any) {})
 
 	ch := make(chan struct{})
 	s.mu.Lock()
@@ -358,6 +353,158 @@ func TestMarkReadyClosedIgnoresStaleChannel(t *testing.T) {
 	case <-cur:
 	default:
 		t.Fatal("current ready channel must be closed")
+	}
+}
+
+// modeAwareProbe 返回一个按当前模式判定的就绪探测：仅当前模式为 coding 且 ctx
+// 未取消时视为就绪。用于模拟“background 大模型加载极慢（永不就绪）、coding 秒就绪”。
+func modeAwareProbe(s *Scheduler) func(context.Context, string) bool {
+	return func(ctx context.Context, string string) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		s.mu.Lock()
+		mode := s.mode
+		s.mu.Unlock()
+		return mode == modeCoding
+	}
+}
+
+// waitSwitchInflight 轮询等待指定目标的切换进入就绪等待阶段（switchTarget 已登记）。
+func waitSwitchInflight(t *testing.T, s *Scheduler, target string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		s.mu.Lock()
+		inflight := s.switchTarget
+		s.mu.Unlock()
+		if inflight == target {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s switch did not enter readiness wait in time", target)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestCodingPreemptsBackgroundStartup 验证方案 C：代理启动后 background 大模型仍在
+// 加载（永不就绪），此时 coding 请求到达应直接抢占 background 加载，而不是排队等
+// 它加载完。coding 应立即就绪，且 Start 不得把这种抢占当致命错误（否则 main.go
+// 会 Fatalf 杀掉代理）。
+func TestCodingPreemptsBackgroundStartup(t *testing.T) {
+	cfg := &config.SchedulingConfig{
+		Coding:     config.ProcessConfig{Command: "", Model: "coding-model", ReadinessURL: "http://127.0.0.1:8080", APIKey: "coding-key"},
+		Background: config.ProcessConfig{Command: "", ReadinessURL: "http://127.0.0.1:8080", APIKey: "bg-key"},
+	}
+	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 3 * time.Second}
+	s := New(cfg, time.Hour, sw, &http.Client{})
+	s.SetProbe(modeAwareProbe(s)) // background 永不就绪，coding 立即就绪
+	ctx := context.Background()
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- s.Start(ctx) }()
+
+	// 等 background 切换进入就绪等待（模拟大模型仍在加载）。
+	waitSwitchInflight(t, s, modeBackground)
+
+	// coding 请求到达：必须插队抢占，而不是等 background 加载完（3s）。
+	t0 := time.Now()
+	ready, err := s.EnsureCoding(ctx)
+	if err != nil {
+		t.Fatalf("ensure coding: %v", err)
+	}
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("coding ready channel not closed promptly after preemption")
+	}
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Errorf("EnsureCoding took %v; preemption should not wait out the 3s background load", d)
+	}
+
+	if s.mode != modeCoding || !s.readyOK {
+		t.Fatalf("expected coding ready, got mode=%s ready=%v", s.mode, s.readyOK)
+	}
+	if got := s.ActiveAPIKey(); got != "coding-key" {
+		t.Fatalf("ActiveAPIKey=%q, want coding-key", got)
+	}
+
+	// Start 必须把“首次 background 加载被抢占”视为非致命并返回 nil。
+	select {
+	case err := <-startDone:
+		if err != nil {
+			t.Fatalf("Start should not fail when initial background load is preempted: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not return after preemption")
+	}
+}
+
+// TestCodingPreemptsIdleSwitchBack 验证方案 C 的另一半：运行期空闲切回 background
+// 的切换在加载期间被新的 coding 请求抢占，background 切换应快速以“被抢占”错误返回，
+// coding 切换随即完成。
+func TestCodingPreemptsIdleSwitchBack(t *testing.T) {
+	// 短租约：空闲切回 background 只在租约过期后才发生（与 Loop 的触发条件一致）。
+	s := newTestScheduler(t, 50*time.Millisecond)
+	ctx := context.Background()
+
+	// 先让 coding 就绪。
+	ready, err := s.ensureTarget(ctx, modeCoding, "", "http://127.0.0.1:8080", "", "")
+	if err != nil {
+		t.Fatalf("ensure coding: %v", err)
+	}
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial coding did not become ready")
+	}
+	if s.mode != modeCoding || !s.readyOK {
+		t.Fatalf("expected coding ready, got mode=%s ready=%v", s.mode, s.readyOK)
+	}
+
+	// 等 coding 租约过期，空闲切回 background 才合法（否则会被租约保护跳过）。
+	time.Sleep(120 * time.Millisecond)
+
+	// background 永不就绪（模拟大模型加载慢）。
+	s.SetProbe(modeAwareProbe(s))
+
+	bgErrCh := make(chan error, 1)
+	go func() {
+		_, e := s.ensureTarget(ctx, modeBackground, "", "http://127.0.0.1:8080", "", "")
+		bgErrCh <- e
+	}()
+	waitSwitchInflight(t, s, modeBackground)
+
+	// coding 请求到达，抢占在途的 background 切换。
+	t0 := time.Now()
+	ready2, err := s.EnsureCoding(ctx)
+	if err != nil {
+		t.Fatalf("ensure coding: %v", err)
+	}
+	select {
+	case <-ready2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("coding ready channel not closed promptly after preemption")
+	}
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Errorf("EnsureCoding took %v; preemption should cut the background load short", d)
+	}
+
+	select {
+	case bgErr := <-bgErrCh:
+		if bgErr == nil || !strings.Contains(bgErr.Error(), "preempted") {
+			t.Errorf("background switch should report preemption, got: %v", bgErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("background switch did not return after preemption")
+	}
+
+	if s.mode != modeCoding || !s.readyOK {
+		t.Fatalf("expected coding ready, got mode=%s ready=%v", s.mode, s.readyOK)
+	}
+	if got := s.ActiveAPIKey(); got != "coding-key" {
+		t.Fatalf("ActiveAPIKey=%q, want coding-key", got)
 	}
 }
 
