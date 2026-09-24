@@ -78,6 +78,14 @@ func (s *Scheduler) SetProbe(f func(ctx context.Context, url string) bool) *Sche
 	return s
 }
 
+// SetTimings 热更新 lease 与 switch 时序参数（Loop 每轮重读 lease，下一 tick 生效）。
+func (s *Scheduler) SetTimings(lease time.Duration, sw config.SwitchConfig) {
+	s.mu.Lock()
+	s.lease = lease
+	s.sw = sw
+	s.mu.Unlock()
+}
+
 // SetActiveCount 注入在途请求计数函数，用于切换时优雅排空。
 func (s *Scheduler) SetActiveCount(f func() int64) *Scheduler {
 	s.activeCount = f
@@ -223,20 +231,29 @@ func apiBaseFromReadiness(readinessURL string) string {
 // Loop 运行租约超时检查与周期性就绪探活：距最后一次 coding 模型流量超过 lease 则切回
 // background；同时每 5s 对当前模式进程做就绪探测，恢复因启动超时误标为未就绪的进程。
 func (s *Scheduler) Loop(ctx context.Context) {
-	if s.lease <= 0 {
+	s.mu.Lock()
+	lease := s.lease
+	s.mu.Unlock()
+	if lease <= 0 {
 		return
 	}
-	leaseTicker := time.NewTicker(s.lease)
-	defer leaseTicker.Stop()
 	probeTicker := time.NewTicker(5 * time.Second)
 	defer probeTicker.Stop()
 	for {
+		// lease 支持热更新（SetTimings），每轮按当前值重建定时器；
+		// 运行中从 0 改为 >0 不生效（Loop 已退出），属边界情况，需重启。
+		s.mu.Lock()
+		lease = s.lease
+		s.mu.Unlock()
+		leaseTimer := time.NewTimer(lease)
 		select {
 		case <-ctx.Done():
+			leaseTimer.Stop()
 			return
 		case <-probeTicker.C:
+			leaseTimer.Stop()
 			s.reconcileReady()
-		case <-leaseTicker.C:
+		case <-leaseTimer.C:
 			s.mu.Lock()
 			idle := s.mode == modeCoding && !s.lastCodingAt.IsZero() && time.Since(s.lastCodingAt) >= s.lease
 			s.mu.Unlock()

@@ -527,7 +527,7 @@ func TestGetDailyStats(t *testing.T) {
 
 	records := []model.RequestRecord{
 		// day2: 2 个请求，均为 200
-		{ID: "d2-1", CreatedAt: day2, Method: http.MethodPost, Path: "/v1/chat/completions", StatusCode: http.StatusOK, PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+		{ID: "d2-1", CreatedAt: day2, Method: http.MethodPost, Path: "/v1/chat/completions", StatusCode: http.StatusOK, PromptTokens: 10, CachedPromptTokens: 8, CompletionTokens: 20, TotalTokens: 30},
 		{ID: "d2-2", CreatedAt: day2, Method: http.MethodPost, Path: "/v1/chat/completions", StatusCode: http.StatusOK, PromptTokens: 5, CompletionTokens: 5, TotalTokens: 10},
 		// day1: 3 个请求：1 个 200、1 个 404、1 个 500
 		{ID: "d1-1", CreatedAt: day1, Method: http.MethodPost, Path: "/v1/chat/completions", StatusCode: http.StatusOK, PromptTokens: 100, CompletionTokens: 0, TotalTokens: 100},
@@ -568,6 +568,9 @@ func TestGetDailyStats(t *testing.T) {
 		}
 		if it["total_tokens"].(int64) != 40 {
 			t.Errorf("day2 total_tokens=%v", it["total_tokens"])
+		}
+		if it["cached_prompt_tokens"].(int64) != 8 {
+			t.Errorf("day2 cached_prompt_tokens=%v", it["cached_prompt_tokens"])
 		}
 		if it["ok_requests"].(int64) != 2 || it["err4xx"].(int64) != 0 || it["err5xx"].(int64) != 0 {
 			t.Errorf("day2 status counts=%v/%v/%v", it["ok_requests"], it["err4xx"], it["err5xx"])

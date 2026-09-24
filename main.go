@@ -118,6 +118,8 @@ func main() {
 			yamlCfg.Scheduling.Lease.CodingIdleTimeout, yamlCfg.Scheduling.Switch.DrainTimeout, yamlCfg.Scheduling.Switch.KillTimeout, yamlCfg.Scheduling.Switch.StartupTimeout)
 	}
 	go st.CleanupLoop(ctx)
+	// 配置文件动态加载：变更时热更新可动态项，不可热更新项保留旧值并提示重启。
+	go watchConfig(ctx, s, configPath)
 	if cfg.PollBackendMetrics {
 		go s.backendMetricsLoop(ctx)
 	}

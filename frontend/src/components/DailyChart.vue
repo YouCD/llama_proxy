@@ -40,6 +40,7 @@ let requestsChart = null
 
 const DATE_COLORS = {
   prompt: '#3b82f6',
+  cached: '#06b6d4',
   completion: '#22c55e',
   total: '#f59e0b',
 }
@@ -62,6 +63,7 @@ function render() {
   const labels = {
     totalTokens: t('chartTotalTokens'),
     promptTokens: t('chartPromptTokens'),
+    cachedTokens: t('chartCachedTokens'),
     completionTokens: t('chartCompletionTokens'),
     ok: t('chartOk'),
     err4xx: t('chartErr4xx'),
@@ -79,7 +81,7 @@ function renderToken(dates, items, labels) {
   tokenChart.setOption({
     tooltip: { trigger: 'axis', valueFormatter: (v) => fmtCompact(v) },
     legend: {
-      data: [labels.promptTokens, labels.completionTokens, labels.totalTokens],
+      data: [labels.promptTokens, labels.cachedTokens, labels.completionTokens, labels.totalTokens],
       bottom: 0,
       itemWidth: 14,
       itemHeight: 8,
@@ -115,6 +117,15 @@ function renderToken(dates, items, labels) {
         data: items.map((d) => d.prompt_tokens || 0),
         lineStyle: { width: 2, color: DATE_COLORS.prompt },
         itemStyle: { color: DATE_COLORS.prompt },
+      },
+      {
+        name: labels.cachedTokens,
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        data: items.map((d) => d.cached_prompt_tokens || 0),
+        lineStyle: { width: 2, color: DATE_COLORS.cached },
+        itemStyle: { color: DATE_COLORS.cached },
       },
       {
         name: labels.completionTokens,

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"llama_proxy/internal/db"
@@ -24,9 +25,10 @@ import (
 
 // Store 封装 GORM 句柄与数据目录上的持久化/统计逻辑。
 type Store struct {
-	db            db.Database
-	dataDir       string
-	retentionDays int
+	db      db.Database
+	dataDir string
+	// retentionDays 数据保留天数，atomic 支持配置热更新（SetRetentionDays）。
+	retentionDays atomic.Int32
 	isPostgres    bool
 
 	// Active 返回当前在途请求数（用于统计的 active_connections）；nil 按 0 计。
@@ -35,12 +37,18 @@ type Store struct {
 
 // New 基于数据库句柄与数据目录创建 Store。
 func New(database db.Database, dataDir string, retentionDays int) *Store {
-	return &Store{
-		db:            database,
-		dataDir:       dataDir,
-		retentionDays: retentionDays,
-		isPostgres:    db.IsPostgresDB(database),
+	st := &Store{
+		db:         database,
+		dataDir:    dataDir,
+		isPostgres: db.IsPostgresDB(database),
 	}
+	st.retentionDays.Store(int32(retentionDays))
+	return st
+}
+
+// SetRetentionDays 热更新数据保留天数（Cleanup 下一次执行时生效）。
+func (st *Store) SetRetentionDays(days int) {
+	st.retentionDays.Store(int32(days))
 }
 
 // activeCount 返回在途请求数（Active 未注入时按 0 计）。
@@ -580,10 +588,11 @@ func (st *Store) CleanupLoop(ctx context.Context) {
 }
 
 func (st *Store) Cleanup() {
-	if st.retentionDays <= 0 {
+	days := st.retentionDays.Load()
+	if days <= 0 {
 		return
 	}
-	cutoff := time.Now().UTC().AddDate(0, 0, -st.retentionDays)
+	cutoff := time.Now().UTC().AddDate(0, 0, -int(days))
 	cutoffVal := st.createdAtValue(cutoff)
 	if err := db.RetryWrite(func() error {
 		return st.db.Exec(`DELETE FROM requests WHERE created_at < ?`, cutoffVal).Error
@@ -602,7 +611,7 @@ func (st *Store) Cleanup() {
 		log.WithCtx(context.Background()).Infof("cleanup raw read failed: %v", err)
 		return
 	}
-	cutoffDate := time.Now().UTC().AddDate(0, 0, -st.retentionDays)
+	cutoffDate := time.Now().UTC().AddDate(0, 0, -int(days))
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -733,6 +742,7 @@ func (st *Store) GetDailyStats(days int, f model.RequestFilter) ([]map[string]an
 		` + dateExpr + `,
 		COUNT(*),
 		COALESCE(SUM(prompt_tokens),0),
+		COALESCE(SUM(cached_prompt_tokens),0),
 		COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(total_tokens),0),
 		COALESCE(SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END),0),
@@ -755,20 +765,21 @@ func (st *Store) GetDailyStats(days int, f model.RequestFilter) ([]map[string]an
 	out := make([]map[string]any, 0, days)
 	for rows.Next() {
 		var date string
-		var count, promptTok, completionTok, totalTok, okCount, err4xx, err5xx int64
-		if err := rows.Scan(&date, &count, &promptTok, &completionTok, &totalTok,
+		var count, promptTok, cachedTok, completionTok, totalTok, okCount, err4xx, err5xx int64
+		if err := rows.Scan(&date, &count, &promptTok, &cachedTok, &completionTok, &totalTok,
 			&okCount, &err4xx, &err5xx); err != nil {
 			return nil, err
 		}
 		out = append(out, map[string]any{
-			"date":              date,
-			"total_requests":    count,
-			"prompt_tokens":     promptTok,
-			"completion_tokens": completionTok,
-			"total_tokens":      totalTok,
-			"ok_requests":       okCount,
-			"err4xx":            err4xx,
-			"err5xx":            err5xx,
+			"date":                 date,
+			"total_requests":       count,
+			"prompt_tokens":        promptTok,
+			"cached_prompt_tokens": cachedTok,
+			"completion_tokens":    completionTok,
+			"total_tokens":         totalTok,
+			"ok_requests":          okCount,
+			"err4xx":               err4xx,
+			"err5xx":               err5xx,
 		})
 	}
 	if err := rows.Err(); err != nil {

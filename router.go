@@ -141,21 +141,22 @@ func (s *Server) apiStatsByBackend(c *gin.Context) {
 // enrichBackendMeta 给统计条目附带配置中的部署模型与路由标签，
 // 供面板在后端地址下方展示“部署了哪些模型、属于哪些路由池”。
 func (s *Server) enrichBackendMeta(items []map[string]any) {
-	if s.yamlCfg == nil || len(items) == 0 {
+	_, yamlCfg := s.snapshot()
+	if yamlCfg == nil || len(items) == 0 {
 		return
 	}
-	meta := make(map[string]map[string]any, len(s.yamlCfg.Backends.List)+1)
-	for _, b := range s.yamlCfg.Backends.List {
+	meta := make(map[string]map[string]any, len(yamlCfg.Backends.List)+1)
+	for _, b := range yamlCfg.Backends.List {
 		if b.URL == "" {
 			continue
 		}
 		meta[b.URL] = map[string]any{"model": b.Model, "tags": sortedTagList(b.EffectiveTags())}
 	}
 	// 本地 background 节点就绪时同样附带标签（模型名不在配置里，置空）。
-	if s.yamlCfg.Scheduling != nil && s.scheduler != nil {
+	if yamlCfg.Scheduling != nil && s.scheduler != nil {
 		if base, ready := s.scheduler.BackgroundReady(); ready && base != "" {
 			if _, ok := meta[base]; !ok {
-				meta[base] = map[string]any{"model": "", "tags": sortedTagList(s.yamlCfg.Scheduling.Background.EffectiveTags())}
+				meta[base] = map[string]any{"model": "", "tags": sortedTagList(yamlCfg.Scheduling.Background.EffectiveTags())}
 			}
 		}
 	}
@@ -446,7 +447,8 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 	ids := []string{ProxyModelID}
 	seen := map[string]bool{ProxyModelID: true}
-	if s.yamlCfg != nil {
+	_, yamlCfg := s.snapshot()
+	if yamlCfg != nil {
 		add := func(id string) {
 			id = strings.TrimSpace(id)
 			if id != "" && !seen[id] {
@@ -454,10 +456,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				ids = append(ids, id)
 			}
 		}
-		for i := range s.yamlCfg.Backends.List {
-			add(s.yamlCfg.Backends.List[i].Model)
+		for i := range yamlCfg.Backends.List {
+			add(yamlCfg.Backends.List[i].Model)
 		}
-		if sc := s.yamlCfg.Scheduling; sc != nil {
+		if sc := yamlCfg.Scheduling; sc != nil {
 			add(sc.Coding.Model)
 			add(sc.Background.Model)
 		}

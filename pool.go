@@ -53,7 +53,8 @@ const localBackgroundBackendName = "local-background"
 // 就绪时作为后端节点入池（与 backends.list 一起参与负载均衡）；
 // 未就绪（coding 进行中/启动中/崩溃）时出池。仅状态变化时重建池。
 func (s *Server) syncLocalBackendNode() {
-	if s.balancer == nil || s.scheduler == nil || s.yamlCfg == nil || s.yamlCfg.Scheduling == nil {
+	_, yamlCfg := s.snapshot()
+	if s.balancer == nil || s.scheduler == nil || yamlCfg == nil || yamlCfg.Scheduling == nil {
 		return
 	}
 	base, ready := s.scheduler.BackgroundReady()
@@ -64,7 +65,7 @@ func (s *Server) syncLocalBackendNode() {
 	merged := make([]config.BackendConfig, 0, len(s.staticBackends)+1)
 	merged = append(merged, s.staticBackends...)
 	if ready && base != "" {
-		w := s.yamlCfg.Scheduling.Background.Weight
+		w := yamlCfg.Scheduling.Background.Weight
 		if w <= 0 {
 			w = 1
 		}
@@ -72,10 +73,10 @@ func (s *Server) syncLocalBackendNode() {
 			Name:   localBackgroundBackendName,
 			URL:    base,
 			Weight: w,
-			Tags:   s.yamlCfg.Scheduling.Background.Tags,
-			APIKey: s.yamlCfg.Scheduling.Background.APIKey,
+			Tags:   yamlCfg.Scheduling.Background.Tags,
+			APIKey: yamlCfg.Scheduling.Background.APIKey,
 			// 固化 background 模型的模型 ID：请求该 ID 时可经 GetBackendByModel 反查到本地节点直连。
-			Model: s.yamlCfg.Scheduling.Background.Model,
+			Model: yamlCfg.Scheduling.Background.Model,
 		})
 	}
 	s.balancer.Update(merged)
@@ -97,7 +98,8 @@ func (s *Server) syncLocalBackendNodeLoop(ctx context.Context) {
 
 // backendMetricsLoop 按配置间隔抓取各后端 /metrics 并入库。
 func (s *Server) backendMetricsLoop(ctx context.Context) {
-	ticker := time.NewTicker(s.cfg.PollInterval)
+	cfg, _ := s.snapshot()
+	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 	for {
 		select {

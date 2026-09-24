@@ -22,10 +22,12 @@ import (
 
 // handleProxy 是代理转发入口：选择后端、转发请求、流式回传并记录指标。
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
+	// 请求开始时取一份配置快照，处理期间配置热更新不影响本请求的判定。
+	cfg, _ := s.snapshot()
 	// 校验客户端 API Key（如果已配置）
-	if s.cfg.APIKey != "" {
+	if cfg.APIKey != "" {
 		clientAuth := strings.TrimSpace(r.Header.Get("Authorization"))
-		if clientAuth != "Bearer "+s.cfg.APIKey {
+		if clientAuth != "Bearer "+cfg.APIKey {
 			httpx.WriteJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized", "message": "missing or invalid api_key"})
 			return
 		}
@@ -44,14 +46,14 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// 创建带 request_id 的请求上下文，日志可按 request_id 串联整个请求生命周期。
 	ctx := s.newInflightCtx(r.Context(), requestID)
 
-	if s.cfg.MaxRequestBytes > 0 && r.ContentLength > s.cfg.MaxRequestBytes {
+	if cfg.MaxRequestBytes > 0 && r.ContentLength > cfg.MaxRequestBytes {
 		httpx.WriteJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "request is too large"})
 		return
 	}
 
 	// 先读请求体并识别模型 ID，再按模型 ID 选择转发后端：
 	// llm_prox（或空）→ 轮询模型列表；具体模型 ID → 直连对应后端/本地进程。
-	originalBody, err := httpx.ReadWithLimit(r.Body, s.cfg.MaxRequestBytes)
+	originalBody, err := httpx.ReadWithLimit(r.Body, cfg.MaxRequestBytes)
 	if err != nil {
 		code := http.StatusBadRequest
 		if errors.Is(err, httpx.ErrTooLarge) {
@@ -202,7 +204,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	var firstByteMs float64
 	var copied int64
 	var chunks int64
-	capturer := meta.NewLimitedBuffer(s.cfg.MaxCaptureBytes)
+	capturer := meta.NewLimitedBuffer(cfg.MaxCaptureBytes)
 
 	if isStreamingResponse(resp, isStreaming) {
 		copied, firstByteMs, chunks, err = streamCopySSE(w, resp.Body, capturer, started)
@@ -293,7 +295,8 @@ func (s *Server) shouldRecordProxy(path string) bool {
 	if path == "/" {
 		return false
 	}
-	return s.pathMatches(path, s.cfg.RecordPaths)
+	cfg, _ := s.snapshot()
+	return s.pathMatches(path, cfg.RecordPaths)
 }
 
 // buildProxyPath 拼接转发路径：当后端 url 已带 /v1 时去掉客户端路径的 /v1 前缀，
@@ -318,12 +321,13 @@ type routeRule struct {
 // effectiveRoutingRules 返回生效的路由规则（来自 routing.rules 配置）；
 // 未配置 routing 时返回空切片（无规则，全部流量走默认池）。
 func (s *Server) effectiveRoutingRules() []routeRule {
-	if s.yamlCfg == nil || s.yamlCfg.Routing == nil || len(s.yamlCfg.Routing.Rules) == 0 {
+	_, yamlCfg := s.snapshot()
+	if yamlCfg == nil || yamlCfg.Routing == nil || len(yamlCfg.Routing.Rules) == 0 {
 		return nil
 	}
-	rules := make([]routeRule, 0, len(s.yamlCfg.Routing.Rules))
-	for i := range s.yamlCfg.Routing.Rules {
-		rr := &s.yamlCfg.Routing.Rules[i]
+	rules := make([]routeRule, 0, len(yamlCfg.Routing.Rules))
+	for i := range yamlCfg.Routing.Rules {
+		rr := &yamlCfg.Routing.Rules[i]
 		name := strings.TrimSpace(rr.Name)
 		if name == "" {
 			name = fmt.Sprintf("rule-%d", i+1)
@@ -524,10 +528,11 @@ func (s *Server) selectCodingBackend(ctx context.Context, reqModel string) (*bac
 
 // schedulingConfig 返回调度配置（未启用调度时为 nil）。
 func (s *Server) schedulingConfig() *config.SchedulingConfig {
-	if s.yamlCfg == nil || s.yamlCfg.Scheduling == nil {
+	_, yamlCfg := s.snapshot()
+	if yamlCfg == nil || yamlCfg.Scheduling == nil {
 		return nil
 	}
-	return s.yamlCfg.Scheduling
+	return yamlCfg.Scheduling
 }
 
 // backendCandidate 是单个转发目标（后端地址及其配置；动态指定后端时 cfg 为 nil）。

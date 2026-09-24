@@ -1,12 +1,18 @@
 // Package config 定义 YAML 配置结构与运行时（legacy）配置。
+// 配置通过 viper 读取文件并解码（mapstructure 标签），解码后应用默认值，
+// 再用 go-playground/validator 做声明式校验，最后做跨字段/业务校验。
 package config
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/go-playground/validator/v10"
+	"github.com/mitchellh/mapstructure"
+	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
 
@@ -26,62 +32,62 @@ type Config struct {
 }
 
 type YAMLConfig struct {
-	Server     ServerConfig      `yaml:"server"`
-	Database   DatabaseConfig    `yaml:"database"`
-	Backends   BackendsConfig    `yaml:"backends"`
-	Proxy      ProxyConfig       `yaml:"proxy"`
-	Routing    *RoutingConfig    `yaml:"routing"`
-	Scheduling *SchedulingConfig `yaml:"scheduling"`
+	Server     ServerConfig      `mapstructure:"server"`
+	Database   DatabaseConfig    `mapstructure:"database"`
+	Backends   BackendsConfig    `mapstructure:"backends"`
+	Proxy      ProxyConfig       `mapstructure:"proxy"`
+	Routing    *RoutingConfig    `mapstructure:"routing"`
+	Scheduling *SchedulingConfig `mapstructure:"scheduling"`
 }
 
 // RoutingConfig 描述按客户端特征路由到指定标签池的规则表。
 // 规则按配置顺序评估，首条命中的规则生效；未配置时不存在路由规则，全部流量走默认池。
 type RoutingConfig struct {
-	Rules []RoutingRule `yaml:"rules"`
+	Rules []RoutingRule `mapstructure:"rules" validate:"dive"`
 }
 
 // RoutingRule 描述一条路由规则：Header 条件命中后，请求只从 Pool 标签对应的后端子池
 // 中选择；请求失败时自动故障转移到子池内下一个未尝试的后端。
 type RoutingRule struct {
 	// Name 规则名，仅用于日志与报错；留空时按序号生成。
-	Name string `yaml:"name"`
+	Name string `mapstructure:"name"`
 	// Header 规则命中条件：每个请求头的名称与值都必须与客户端请求头匹配，map 内所有
 	// key 同时满足（AND）才算命中。头名按规范化形式比较（服务端不区分大小写），头值
 	// trim 后精确相等、区分大小写。
-	Header map[string]string `yaml:"header"`
+	Header map[string]string `mapstructure:"header" validate:"min=1"`
 	// Pool 标签名：命中后只从携带该标签（tags）的后端中选择。
-	Pool string `yaml:"pool"`
+	Pool string `mapstructure:"pool" validate:"required"`
 }
 
 // SchedulingConfig 描述进程调度子系统的配置。为 nil 时整个调度子系统禁用，
 // 代理退化为纯转发模式（转发到 backends.list 外部后端）。
 type SchedulingConfig struct {
-	Coding     ProcessConfig `yaml:"coding"`
-	Background ProcessConfig `yaml:"background"`
+	Coding     ProcessConfig `mapstructure:"coding"`
+	Background ProcessConfig `mapstructure:"background"`
 	// Lease 描述开发租约相关配置。
-	Lease LeaseConfig `yaml:"lease"`
+	Lease LeaseConfig `mapstructure:"lease"`
 	// Switch 描述模型切换时的时序参数。
-	Switch SwitchConfig `yaml:"switch"`
+	Switch SwitchConfig `mapstructure:"switch"`
 }
 
 // ProcessConfig 描述模型进程的启动配置（coding/background 共用）。
 // Model 固化该进程对外服务的模型 ID：客户端请求该模型 ID 时，调度器据此启动
 // （或切换到）对应进程；启动时校验所有模型 ID 互不重复，保证路由无歧义。
 type ProcessConfig struct {
-	Command string `yaml:"command"`
+	Command string `mapstructure:"command"`
 	// Model 固化该进程服务的模型 ID（如 "qwen3.8"），请求该 ID 时路由/启动对应进程。
-	Model        string `yaml:"model"`
-	ReadinessURL string `yaml:"readiness_url"`
+	Model        string `mapstructure:"model"`
+	ReadinessURL string `mapstructure:"readiness_url"`
 	// APIKey 是模型进程自身的 API Key（对应 llama-server 的 --api-key）。
 	// 非空时：就绪探测与代理转发均使用 Authorization: Bearer <key>，客户端 key 与后端 key 隔离。
-	APIKey  string `yaml:"api_key"`
-	LogFile string `yaml:"log_file"`
+	APIKey  string `mapstructure:"api_key"`
+	LogFile string `mapstructure:"log_file"`
 	// Weight 仅对 background 生效：本地 background 模型进程就绪后作为后端节点加入
 	// 代理池（与 backends.list 一起负载均衡）时的权重，未配置按 1 处理。
-	Weight int `yaml:"weight"`
+	Weight int `mapstructure:"weight" validate:"gte=1"`
 	// Tags 仅对 background 生效：本地 background 节点入池后携带的路由标签，
 	// routing 规则的 pool 可与之对应（含 "tool_call" 标签即加入 tool_call 子池）。
-	Tags []string `yaml:"tags"`
+	Tags []string `mapstructure:"tags"`
 }
 
 // EffectiveTags 返回本地 background 节点的有效标签集（语义同 BackendConfig.EffectiveTags）。
@@ -98,58 +104,60 @@ func (p *ProcessConfig) EffectiveTags() map[string]bool {
 // LeaseConfig 描述开发租约相关配置。
 type LeaseConfig struct {
 	// CodingIdleTimeout 距最后一次 coding 流量超过该时长即切回 background。
-	CodingIdleTimeout time.Duration `yaml:"coding_idle_timeout"`
+	CodingIdleTimeout time.Duration `mapstructure:"coding_idle_timeout"`
 }
 
 // SwitchConfig 描述模型切换时的时序参数。
 type SwitchConfig struct {
-	DrainTimeout   time.Duration `yaml:"drain_timeout"`
-	KillTimeout    time.Duration `yaml:"kill_timeout"`
-	StartupTimeout time.Duration `yaml:"startup_timeout"`
+	DrainTimeout   time.Duration `mapstructure:"drain_timeout"`
+	KillTimeout    time.Duration `mapstructure:"kill_timeout"`
+	StartupTimeout time.Duration `mapstructure:"startup_timeout"`
 }
 
 type ServerConfig struct {
-	ListenAddr string `yaml:"listen_addr"`
-	DataDir    string `yaml:"data_dir"`
+	ListenAddr string `mapstructure:"listen_addr" validate:"required"`
+	DataDir    string `mapstructure:"data_dir" validate:"required"`
 	// UIAllowedHosts 允许访问 /_proxy/ui 面板的 Host 列表（忽略端口与大小写）。
 	// 为空则不限制；配置后，Host 不在列表内的请求访问面板将返回 403。
-	UIAllowedHosts []string `yaml:"ui_allowed_hosts"`
-	LogLevel       string   `yaml:"log_level"`
+	UIAllowedHosts []string `mapstructure:"ui_allowed_hosts"`
+	// LogLevel 日志级别：debug / info / warn / error / fatal，留空使用默认值。
+	// 具体级别由 log.SetLogLevel 容错处理，此处不做枚举校验。
+	LogLevel string `mapstructure:"log_level"`
 }
 
 type DatabaseConfig struct {
-	Type       string           `yaml:"type"`
-	SQLite     SQLiteConfig     `yaml:"sqlite"`
-	PostgreSQL PostgreSQLConfig `yaml:"postgresql"`
+	Type       string           `mapstructure:"type" validate:"required,oneof=sqlite postgresql"`
+	SQLite     SQLiteConfig     `mapstructure:"sqlite"`
+	PostgreSQL PostgreSQLConfig `mapstructure:"postgresql"`
 }
 
 type SQLiteConfig struct {
-	Path string `yaml:"path"`
+	Path string `mapstructure:"path" validate:"required"`
 }
 
 type PostgreSQLConfig struct {
-	DSN             string `yaml:"dsn"`
-	MaxOpenConns    int    `yaml:"max_open_conns"`
-	MaxIdleConns    int    `yaml:"max_idle_conns"`
-	ConnMaxLifetime int    `yaml:"conn_max_lifetime_seconds"`
+	DSN             string `mapstructure:"dsn" validate:"required_if=Type postgresql"`
+	MaxOpenConns    int    `mapstructure:"max_open_conns" validate:"gte=0"`
+	MaxIdleConns    int    `mapstructure:"max_idle_conns" validate:"gte=0"`
+	ConnMaxLifetime int    `mapstructure:"conn_max_lifetime_seconds" validate:"gte=0"`
 }
 
 type BackendsConfig struct {
-	List     []BackendConfig `yaml:"list"`
-	Strategy string          `yaml:"strategy"`
+	List     []BackendConfig `mapstructure:"list" validate:"dive"`
+	Strategy string          `mapstructure:"strategy" validate:"required,oneof=wrr swrr rr random"`
 }
 
 type BackendConfig struct {
-	Name   string `yaml:"name"`
-	URL    string `yaml:"url"`
-	Weight int    `yaml:"weight"`
+	Name   string `mapstructure:"name" validate:"required"`
+	URL    string `mapstructure:"url" validate:"required,backend_url"`
+	Weight int    `mapstructure:"weight" validate:"gte=1"`
 	// Model 是该后端实际部署的模型 ID，转发时自动重写请求体的 model 字段。
-	Model string `yaml:"model"`
+	Model string `mapstructure:"model"`
 	// APIKey 是该后端自身的 API Key，转发时自动注入 Authorization: Bearer <key>。
-	APIKey string `yaml:"api_key"`
+	APIKey string `mapstructure:"api_key"`
 	// Tags 是该后端加入的路由标签池列表；routing 规则按 pool 标签选择后端。
 	// 加入 "tool_call" 标签即表示该后端支持工具调用，可供 routing 规则 pool: "tool_call" 选用。
-	Tags []string `yaml:"tags"`
+	Tags []string `mapstructure:"tags"`
 }
 
 // EffectiveTags 返回后端的有效标签集（显式 tags 去除空白后的集合）。
@@ -164,32 +172,81 @@ func (b *BackendConfig) EffectiveTags() map[string]bool {
 }
 
 type ProxyConfig struct {
-	RetentionDays      int      `yaml:"retention_days"`
-	MaxRequestBytes    int      `yaml:"max_request_bytes"`
-	MaxCaptureBytes    int      `yaml:"max_capture_bytes"`
-	RequestTimeout     int      `yaml:"request_timeout_seconds"`
-	PollBackendMetrics *bool    `yaml:"poll_backend_metrics"`
-	PollInterval       int      `yaml:"poll_interval_seconds"`
-	RecordPaths        []string `yaml:"record_paths"`
-	APIKey             string   `yaml:"api_key"` // 客户端访问 proxy 的 API Key，与后端 api_key 隔离
+	RetentionDays      int      `mapstructure:"retention_days" validate:"gte=1"`
+	MaxRequestBytes    int      `mapstructure:"max_request_bytes" validate:"gt=0"`
+	MaxCaptureBytes    int      `mapstructure:"max_capture_bytes" validate:"gt=0"`
+	RequestTimeout     int      `mapstructure:"request_timeout_seconds" validate:"gt=0"`
+	PollBackendMetrics *bool    `mapstructure:"poll_backend_metrics"`
+	PollInterval       int      `mapstructure:"poll_interval_seconds" validate:"gt=0"`
+	RecordPaths        []string `mapstructure:"record_paths"`
+	APIKey             string   `mapstructure:"api_key"` // 客户端访问 proxy 的 API Key，与后端 api_key 隔离
 }
 
+// v 是进程内共享的 validator 实例，Load 每次解码后对其执行 Struct 校验。
+var v = validator.New()
+
+func init() {
+	// 注册后端 URL 校验规则：必须为 http:// 或 https:// 开头的合法地址。
+	if err := v.RegisterValidation("backend_url", func(fl validator.FieldLevel) bool {
+		return ValidateBackendURL(fl.Field().String()) == nil
+	}); err != nil {
+		panic(fmt.Sprintf("register backend_url validation: %v", err))
+	}
+}
+
+// Load 用 viper 读取并解码配置文件，应用默认值与 validator 声明式校验，
+// 最后执行跨字段/业务校验（routing、scheduling、模型 ID 唯一性）。
 func Load(path string) (*YAMLConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
+	vp := viper.New()
+	vp.SetConfigFile(path)
+	if err := vp.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+
 	cfg := &YAMLConfig{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, err
+	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		TagName:          "mapstructure",
+		WeaklyTypedInput: true,
+		Result:           cfg,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			mapstructure.StringToTimeDurationHookFunc(),
+			mapstructure.StringToSliceHookFunc(","),
+		),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("init decoder: %w", err)
+	}
+	if err := dec.Decode(vp.AllSettings()); err != nil {
+		return nil, fmt.Errorf("decode config %s: %w", path, err)
 	}
 
 	if err := checkLegacyRouting(data); err != nil {
 		return nil, err
 	}
 
+	// viper 会把所有 key 统一小写，routing 规则的 header 头名被一并小写化；
+	// 头名匹配本就忽略大小写，这里恢复为规范化形式（如 "User-Agent"）便于展示。
+	if cfg.Routing != nil {
+		for i := range cfg.Routing.Rules {
+			for k := range cfg.Routing.Rules[i].Header {
+				if ck := http.CanonicalHeaderKey(k); ck != k {
+					cfg.Routing.Rules[i].Header[ck] = cfg.Routing.Rules[i].Header[k]
+					delete(cfg.Routing.Rules[i].Header, k)
+				}
+			}
+		}
+	}
+
 	setConfigDefaults(cfg)
+
+	if err := v.Struct(cfg); err != nil {
+		return nil, fmt.Errorf("validate config %s: %w", path, err)
+	}
 
 	if err := validateRouting(cfg.Routing); err != nil {
 		return nil, err
@@ -300,7 +357,8 @@ func checkLegacyRouting(data []byte) error {
 	return nil
 }
 
-// validateRouting 校验 routing 规则：每条规则必须指定 pool 与非空 header。
+// validateRouting 保留作为路由规则的结构兜底校验（声明式校验已覆盖 pool/header
+// 非空），当前仅做 trim 后的空串判定以给出带序号的友好报错。
 func validateRouting(rc *RoutingConfig) error {
 	if rc == nil {
 		return nil
@@ -371,6 +429,12 @@ func setConfigDefaults(cfg *YAMLConfig) {
 	}
 
 	if cfg.Scheduling != nil {
+		if cfg.Scheduling.Coding.Weight == 0 {
+			cfg.Scheduling.Coding.Weight = 1
+		}
+		if cfg.Scheduling.Background.Weight == 0 {
+			cfg.Scheduling.Background.Weight = 1
+		}
 		if cfg.Scheduling.Lease.CodingIdleTimeout == 0 {
 			cfg.Scheduling.Lease.CodingIdleTimeout = 30 * time.Minute
 		}

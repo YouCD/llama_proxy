@@ -17,8 +17,11 @@ import (
 // HTTP 入口见 router.go 的 gin 路由引擎；
 // 后端池/调度的胶水逻辑（入池同步、metrics 轮询、事件广播）见 pool.go。
 type Server struct {
-	cfg            config.Config
-	yamlCfg        *config.YAMLConfig
+	cfg     config.Config
+	yamlCfg *config.YAMLConfig
+	// cfgMu 保护可热更新的配置三元组（cfg / yamlCfg / staticBackends）：
+	// config.Load 产出的配置结构体一经发布即视为不可变，yamlCfg 指针可安全共享。
+	cfgMu          sync.RWMutex
 	store          *store.Store
 	balancer       *balancer.Balancer
 	scheduler      *scheduler.Scheduler
@@ -37,6 +40,23 @@ type Server struct {
 	// routerOnce/router 惰性构建并缓存 gin 路由引擎（见 router.go）。
 	routerOnce sync.Once
 	router     http.Handler
+}
+
+// snapshot 原子返回当前 legacy 配置副本与 YAML 配置指针。
+// 读取方在请求处理期间持有一致视图，热更新不会撕裂读到的配置。
+func (s *Server) snapshot() (config.Config, *config.YAMLConfig) {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg, s.yamlCfg
+}
+
+// applyConfig 发布新配置三元组（配置热更新后调用）。
+func (s *Server) applyConfig(cfg config.Config, yamlCfg *config.YAMLConfig, staticBackends []config.BackendConfig) {
+	s.cfgMu.Lock()
+	s.cfg = cfg
+	s.yamlCfg = yamlCfg
+	s.staticBackends = staticBackends
+	s.cfgMu.Unlock()
 }
 
 // newInflightCtx 返回一个带 request_id 的请求上下文，供 log.WithCtx 提取，
