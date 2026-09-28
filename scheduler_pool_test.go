@@ -91,7 +91,7 @@ func newPoolTestServer(t *testing.T, cfg *config.SchedulingConfig, staticBackend
 }
 
 // testDo 经代理发起一次 chat 请求，返回状态码。coding=true 时请求 coding 固化的模型 ID，
-// 否则请求 llm_prox（轮询代理池）。
+// 否则请求 llm_proxy（轮询代理池）。
 func (s *Server) testDo(t *testing.T, proxyURL string, coding bool) int {
 	t.Helper()
 	model := ProxyModelID

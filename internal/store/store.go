@@ -348,10 +348,14 @@ func (st *Store) GetStats(f model.RequestFilter) (map[string]any, error) {
 
 	var totalRequests int64
 	var promptTokens int64
+	var cachedTokens int64
 	var completionTokens int64
 	var totalTokens int64
 	var lifetimeRequests int64
 	var lifetimeTokens int64
+	var lifetimePromptTokens int64
+	var lifetimeCachedTokens int64
+	var lifetimeCompletionTokens int64
 	var reqBytes int64
 	var respBytes int64
 	var avgPromptMs float64
@@ -364,6 +368,7 @@ func (st *Store) GetStats(f model.RequestFilter) (map[string]any, error) {
 	query := `SELECT
 		COUNT(*),
 		COALESCE(SUM(prompt_tokens),0),
+		COALESCE(SUM(cached_prompt_tokens),0),
 		COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(total_tokens),0),
 		COALESCE(SUM(request_bytes),0),
@@ -382,6 +387,7 @@ func (st *Store) GetStats(f model.RequestFilter) (map[string]any, error) {
 	if err := row.Scan(
 		&totalRequests,
 		&promptTokens,
+		&cachedTokens,
 		&completionTokens,
 		&totalTokens,
 		&reqBytes,
@@ -397,10 +403,19 @@ func (st *Store) GetStats(f model.RequestFilter) (map[string]any, error) {
 	}
 	row = st.db.Raw(`SELECT
 		COUNT(*),
+		COALESCE(SUM(prompt_tokens),0),
+		COALESCE(SUM(cached_prompt_tokens),0),
+		COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(total_tokens),0)
 		FROM requests`).Row()
-	if err := row.Scan(&lifetimeRequests, &lifetimeTokens); err != nil {
+	if err := row.Scan(&lifetimeRequests, &lifetimePromptTokens, &lifetimeCachedTokens,
+		&lifetimeCompletionTokens, &lifetimeTokens); err != nil {
 		return nil, err
+	}
+
+	cacheHitPct := 0.0
+	if promptTokens > 0 {
+		cacheHitPct = float64(cachedTokens) / float64(promptTokens) * 100
 	}
 
 	rpm := float64(totalRequests) / (secs / 60)
@@ -417,12 +432,20 @@ func (st *Store) GetStats(f model.RequestFilter) (map[string]any, error) {
 		"active_connections":       st.activeCount(),
 		"total_requests":           totalRequests,
 		"total_prompt_tokens":      promptTokens,
+		"total_cached_tokens":      cachedTokens,
+		"total_input_tokens":       promptTokens - cachedTokens,
 		"total_completion_tokens":  completionTokens,
 		"total_tokens":             totalTokens,
+		"cache_hit_pct":            cacheHitPct,
 		"matching_total_requests":  totalRequests,
 		"matching_total_tokens":    totalTokens,
 		"lifetime_total_requests":  lifetimeRequests,
+		"lifetime_prompt_tokens":   lifetimePromptTokens,
+		"lifetime_cached_tokens":   lifetimeCachedTokens,
+		"lifetime_completion_tokens": lifetimeCompletionTokens,
 		"lifetime_total_tokens":    lifetimeTokens,
+		"lifetime_cache_hit_pct":   lifetimeCacheHitPct(lifetimePromptTokens, lifetimeCachedTokens),
+		"token_by_model":           st.tokenBreakdownByModel(f),
 		"total_request_bytes":      reqBytes,
 		"total_response_bytes":     respBytes,
 		"avg_prompt_ms":            avgPromptMs,
@@ -786,6 +809,58 @@ func (st *Store) GetDailyStats(days int, f model.RequestFilter) ([]map[string]an
 		return nil, err
 	}
 	return out, nil
+}
+
+// lifetimeCacheHitPct 计算全生命周期的缓存命中率（百分比）。
+func lifetimeCacheHitPct(prompt, cached int64) float64 {
+	if prompt <= 0 {
+		return 0
+	}
+	return float64(cached) / float64(prompt) * 100
+}
+
+// tokenBreakdownByModel 按模型聚合 token 构成（输入/缓存/输出/命中率）。
+// 查询失败时返回空列表，不影响主统计返回。
+func (st *Store) tokenBreakdownByModel(f model.RequestFilter) []map[string]any {
+	query := `SELECT
+		model,
+		COALESCE(SUM(prompt_tokens),0),
+		COALESCE(SUM(cached_prompt_tokens),0),
+		COALESCE(SUM(completion_tokens),0)
+		FROM requests
+		WHERE model IS NOT NULL AND TRIM(model) != ''`
+	args := []any{}
+	query, args = appendRequestFilterSQL(query, args, f, st.isPostgres)
+	query += ` GROUP BY model ORDER BY SUM(prompt_tokens) + SUM(completion_tokens) DESC`
+
+	rows, err := st.db.Raw(query, args...).Rows()
+	if err != nil {
+		return []map[string]any{}
+	}
+	defer rows.Close()
+
+	out := make([]map[string]any, 0, 8)
+	for rows.Next() {
+		var modelName string
+		var promptTok, cachedTok, completionTok int64
+		if err := rows.Scan(&modelName, &promptTok, &cachedTok, &completionTok); err != nil {
+			return []map[string]any{}
+		}
+		hitPct := 0.0
+		if promptTok > 0 {
+			hitPct = float64(cachedTok) / float64(promptTok) * 100
+		}
+		out = append(out, map[string]any{
+			"model":             modelName,
+			"prompt_tokens":      promptTok,
+			"cached_tokens":      cachedTok,
+			"input_tokens":       promptTok - cachedTok,
+			"completion_tokens":  completionTok,
+			"total_tokens":       promptTok + completionTok,
+			"cache_hit_pct":      hitPct,
+		})
+	}
+	return out
 }
 
 // createdAtValue 按数据库类型生成 created_at 参数值。

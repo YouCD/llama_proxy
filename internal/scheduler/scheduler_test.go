@@ -118,6 +118,39 @@ func TestIdleSwitchBackToBackground(t *testing.T) {
 	}
 }
 
+// TestLoopIdleSwitchBack 验证 Loop 中租约到期能真正触发切回 background：
+// 租约必须大于探活周期（探活 tick 先于租约 timer 触发），回归“每轮重建
+// 租约 timer 被 5s 探活 ticker 持续 Stop，idle 分支永不执行”的缺陷。
+func TestLoopIdleSwitchBack(t *testing.T) {
+	s := newTestScheduler(t, 300*time.Millisecond) // 租约 > 探活周期 50ms
+	s.probeInterval = 50 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	ready, _ := s.EnsureCoding(ctx)
+	<-ready
+	if s.mode != modeCoding {
+		t.Fatalf("expected coding mode, got %s", s.mode)
+	}
+
+	go s.Loop(ctx)
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		m := s.mode
+		s.mu.Unlock()
+		if m == modeBackground {
+			return
+		}
+		<-ticker.C
+	}
+	t.Fatal("Loop did not switch back to background within 3s")
+}
+
 func TestCodingActiveStateAfterSwitch(t *testing.T) {
 	s := newTestScheduler(t, time.Hour)
 	ctx := context.Background()

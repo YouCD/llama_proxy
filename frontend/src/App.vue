@@ -35,6 +35,8 @@
 
       <BackendStats :items="backendStats" :window-sec="timeWindow.secs" @select="onBackendSelect"/>
 
+      <TokenBreakdown :stats="stats" :has-filters="hasFilters" @select-model="onModelSelect"/>
+
       <div class="panel">
         <section class="daily-section">
           <h2 class="daily-heading">{{ t('dailyTitle') }}</h2>
@@ -72,6 +74,7 @@ import {Refresh} from '@element-plus/icons-vue'
 import StatsCards from './components/StatsCards.vue'
 import SchedulerStatus from './components/SchedulerStatus.vue'
 import BackendStats from './components/BackendStats.vue'
+import TokenBreakdown from './components/TokenBreakdown.vue'
 import DailyChart from './components/DailyChart.vue'
 import FilterPanel from './components/FilterPanel.vue'
 import RequestTable from './components/RequestTable.vue'
@@ -250,6 +253,15 @@ function onBackendSelect(url) {
     filterPanel.value.setBackend(url)
   }
   filters.backend = url
+  refreshAll().catch(() => {
+  })
+}
+
+function onModelSelect(model) {
+  if (filterPanel.value) {
+    filterPanel.value.setModel(model)
+  }
+  filters.model = model
   refreshAll().catch(() => {
   })
 }

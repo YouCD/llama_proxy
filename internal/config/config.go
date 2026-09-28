@@ -290,10 +290,10 @@ func validateSchedulingModels(sc *SchedulingConfig) error {
 }
 
 // ValidateModelIDs 校验所有已配置的模型 ID（backends.list 的 model 与 scheduling 的
-// coding/background model）互不重复，且不与代理占位 ID llm_prox 冲突：
+// coding/background model）互不重复，且不与代理占位 ID llm_proxy 冲突：
 // 具体模型 ID 路由要求"一个模型 ID 唯一对应一个后端/进程"，重复会导致路由歧义。
 func (c *YAMLConfig) ValidateModelIDs() error {
-	const proxyID = "llm_prox"
+	const proxyID = "llama_proxy"
 	seen := make(map[string]string)
 	locate := func(modelID, where string) error {
 		if modelID == proxyID {

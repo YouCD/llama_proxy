@@ -209,6 +209,12 @@ function isActive(kind) {
   return false
 }
 
+function setModel(model) {
+  if (debounceTimer) clearTimeout(debounceTimer)
+  suppressWatch = true
+  f.model = model
+}
+
 function setBackend(url) {
   if (debounceTimer) clearTimeout(debounceTimer)
   suppressWatch = true
@@ -227,7 +233,7 @@ function setUserAgent(ua) {
   f.user_agent = ua
 }
 
-defineExpose({ collect, setBackend, setClientIP, setUserAgent })
+defineExpose({ collect, setModel, setBackend, setClientIP, setUserAgent })
 
 onUnmounted(() => {
   if (debounceTimer) clearTimeout(debounceTimer)

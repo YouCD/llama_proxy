@@ -83,9 +83,10 @@ function renderToken(dates, items, labels) {
     legend: {
       data: [labels.promptTokens, labels.cachedTokens, labels.completionTokens, labels.totalTokens],
       bottom: 0,
-      itemWidth: 14,
+      itemWidth: 12,
       itemHeight: 8,
-      textStyle: { color: textColor() },
+      itemGap: 12,
+      textStyle: { color: textColor(), fontSize: 11 },
     },
     grid: { left: 10, right: 10, top: 20, bottom: 30, containLabel: true },
     xAxis: {

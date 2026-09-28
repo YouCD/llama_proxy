@@ -52,7 +52,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 先读请求体并识别模型 ID，再按模型 ID 选择转发后端：
-	// llm_prox（或空）→ 轮询模型列表；具体模型 ID → 直连对应后端/本地进程。
+	// llm_proxy（或空）→ 轮询模型列表；具体模型 ID → 直连对应后端/本地进程。
 	originalBody, err := httpx.ReadWithLimit(r.Body, cfg.MaxRequestBytes)
 	if err != nil {
 		code := http.StatusBadRequest
@@ -390,7 +390,7 @@ func ruleMatches(r *http.Request, h map[string]string) bool {
 // ProxyModelID 是代理对外暴露的占位模型 ID：客户端请求该 ID（或省略 model 字段）时
 // 按策略轮询模型列表（backends.list + 本地 background 节点）；请求具体模型 ID 时
 // 直连部署该模型的后端/本地进程。
-const ProxyModelID = "llm_prox"
+const ProxyModelID = "llm_proxy"
 
 // statusError 携带期望的 HTTP 状态码（selectBackend 的默认错误按 400 返回）。
 type statusError struct {
@@ -407,7 +407,7 @@ func statusErrf(code int, format string, args ...any) error {
 // selectBackend 选择本次请求的转发后端，返回首个转发候选与故障转移函数。
 // 按请求体中的模型 ID 分派：
 //
-//   - 模型 ID 为 llm_prox（或空）：默认轮询模型列表——命中 routing 规则（若配置）时
+//   - 模型 ID 为 llm_proxy（或空）：默认轮询模型列表——命中 routing 规则（若配置）时
 //     只从规则 pool 标签对应的后端子池（含本地 background 节点）选择；其余流量统一
 //     落入全量代理池（backends.list + 本地 background 节点，本地节点随就绪状态动态
 //     入池/出池，见 syncLocalBackendNode）。请求失败时自动转移到池内下一个未尝试的

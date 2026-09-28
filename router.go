@@ -434,8 +434,8 @@ func (s *Server) schedulerStatus() map[string]any {
 }
 
 // handleModels 让路由器自身应答 OpenAI 兼容的 GET /v1/models。
-// 返回占位模型 llm_prox（轮询模型列表）与所有已配置的具体模型 ID（backends.list
-// 与本地调度进程）：请求 llm_prox 走负载均衡，请求具体模型 ID 直连对应后端/进程。
+// 返回占位模型 llm_proxy（轮询模型列表）与所有已配置的具体模型 ID（backends.list
+// 与本地调度进程）：请求 llm_proxy 走负载均衡，请求具体模型 ID 直连对应后端/进程。
 // 不转发到后端，也不记录。
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	type obj struct {

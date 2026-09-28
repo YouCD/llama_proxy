@@ -21,7 +21,7 @@
 import { computed } from 'vue'
 import AnimatedNumber from './AnimatedNumber.vue'
 import { t } from '../i18n'
-import { fmtNum, fmtCompact, fmtDuration, fmtPctNum, errRateTone } from '../utils'
+import { fmtNum, fmtDuration, fmtPctNum, errRateTone } from '../utils'
 
 const props = defineProps({
   stats: { type: Object, default: () => ({}) },
@@ -38,9 +38,6 @@ const groups = computed(() => {
   const totalMatching = props.hasFilters
     ? (s.matching_total_requests || 0)
     : (s.lifetime_total_requests || 0)
-  const totalTokens = props.hasFilters
-    ? (s.matching_total_tokens || 0)
-    : (s.lifetime_total_tokens || 0)
 
   const llmError = (llm.error_rate || 0) * 100
   const totalError = (s.error_rate || 0) * 100
@@ -69,7 +66,6 @@ const groups = computed(() => {
       title: t('groupResource'),
       cards: [
         { key: 'total', label: t('metricTotalReq'), value: totalMatching, format: fmtNum, foot: windowLabel, step: 1, tier: 'summary' },
-        { key: 'tokens', label: t('metricTotalTok'), value: totalTokens, format: fmtCompact, exact: fmtNum(totalTokens), foot: windowLabel, step: 1, tier: 'summary' },
       ],
     },
   ]

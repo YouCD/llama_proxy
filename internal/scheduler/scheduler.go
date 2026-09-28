@@ -36,7 +36,9 @@ type Scheduler struct {
 
 	// activeCount 返回当前在途请求数，用于切换时的优雅排空。
 	activeCount func() int64
-	probe       func(ctx context.Context, url string) bool
+	// probeInterval 就绪探活周期（测试可缩短）。
+	probeInterval time.Duration
+	probe         func(ctx context.Context, url string) bool
 
 	mu sync.Mutex
 	// switchMu 串行化整个进程切换过程（ensureTarget），防止并发切换覆盖 readyCh，
@@ -65,10 +67,11 @@ type Scheduler struct {
 // NewScheduler 基于调度配置创建一个调度器。日志走全局 log（[scheduler] 前缀）。
 func New(cfg *config.SchedulingConfig, lease time.Duration, sw config.SwitchConfig, client *http.Client) *Scheduler {
 	return &Scheduler{
-		cfg:    cfg,
-		lease:  lease,
-		sw:     sw,
-		client: client,
+		cfg:           cfg,
+		lease:         lease,
+		sw:            sw,
+		client:        client,
+		probeInterval: 5 * time.Second,
 	}
 }
 
@@ -237,23 +240,36 @@ func (s *Scheduler) Loop(ctx context.Context) {
 	if lease <= 0 {
 		return
 	}
-	probeTicker := time.NewTicker(5 * time.Second)
+	probeTicker := time.NewTicker(s.probeInterval)
 	defer probeTicker.Stop()
+	// 租约定时器必须跨轮次持久化：若每轮重建，5s 探活 ticker 会先于任何 >5s 的
+	// 租约定时器触发并 Stop 掉它，导致 idle 切回 background 的分支永不执行。
+	// lease 支持热更新（SetTimings）：值变化时重建；运行中从 0 改为 >0 不生效
+	//（Loop 已退出），属边界情况，需重启。
+	var (
+		leaseTimer *time.Timer
+		curLease   time.Duration
+	)
 	for {
-		// lease 支持热更新（SetTimings），每轮按当前值重建定时器；
-		// 运行中从 0 改为 >0 不生效（Loop 已退出），属边界情况，需重启。
 		s.mu.Lock()
 		lease = s.lease
 		s.mu.Unlock()
-		leaseTimer := time.NewTimer(lease)
+		if leaseTimer == nil || lease != curLease {
+			if leaseTimer != nil {
+				leaseTimer.Stop()
+			}
+			leaseTimer = time.NewTimer(lease)
+			curLease = lease
+		}
 		select {
 		case <-ctx.Done():
 			leaseTimer.Stop()
 			return
 		case <-probeTicker.C:
-			leaseTimer.Stop()
+			// 探活不触碰 leaseTimer，租约到期检查不被打断。
 			s.reconcileReady()
 		case <-leaseTimer.C:
+			leaseTimer = nil // 下轮按当前 lease 重建，支持热更新后的新值。
 			s.mu.Lock()
 			idle := s.mode == modeCoding && !s.lastCodingAt.IsZero() && time.Since(s.lastCodingAt) >= s.lease
 			s.mu.Unlock()

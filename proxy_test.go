@@ -38,7 +38,7 @@ func TestHandleProxyNonStreamingLlamaCppJSON(t *testing.T) {
 	proxy := httptest.NewServer(svc)
 	defer proxy.Close()
 
-	resp, err := proxy.Client().Post(proxy.URL+"/completion", "application/json", strings.NewReader(`{"model":"llm_prox","prompt":"hi"}`))
+	resp, err := proxy.Client().Post(proxy.URL+"/completion", "application/json", strings.NewReader(`{"model":"llm_proxy","prompt":"hi"}`))
 	if err != nil {
 		t.Fatalf("proxy post: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestHandleProxyStreamingLifecycle(t *testing.T) {
 	defer proxy.Close()
 
 	client := proxy.Client()
-	reqBody := `{"model":"llm_prox","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	reqBody := `{"model":"llm_proxy","stream":true,"messages":[{"role":"user","content":"hi"}]}`
 
 	reqDone := make(chan error, 1)
 	go func() {
@@ -202,7 +202,7 @@ func TestProxyRecordPaths(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"model":"llm_prox","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+		_, _ = io.WriteString(w, `{"model":"llm_proxy","usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 	}))
 	defer backend.Close()
 
@@ -215,7 +215,7 @@ func TestProxyRecordPaths(t *testing.T) {
 
 	postJSON := func(path string) *http.Response {
 		resp, err := proxy.Client().Post(proxy.URL+path, "application/json",
-			strings.NewReader(`{"model":"llm_prox","messages":[{"role":"user","content":"hi"}]}`))
+			strings.NewReader(`{"model":"llm_proxy","messages":[{"role":"user","content":"hi"}]}`))
 		if err != nil {
 			t.Fatalf("post %s: %v", path, err)
 		}
@@ -433,7 +433,7 @@ func TestHandleProxyWithModelRewriteAndAPIKey(t *testing.T) {
 	defer proxy.Close()
 
 	resp, err := proxy.Client().Post(proxy.URL+"/v1/chat/completions", "application/json",
-		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
+		strings.NewReader(`{"model":"llm_proxy","messages":[]}`))
 	if err != nil {
 		t.Fatalf("proxy post: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestHandleProxyBackendKeyDoesNotOverrideClientKeyWhenEmpty(t *testing.T) {
 		gotAuth = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"model":"llm_prox","usage":{}}`)
+		_, _ = io.WriteString(w, `{"model":"llm_proxy","usage":{}}`)
 	}))
 	defer backend.Close()
 
@@ -498,7 +498,7 @@ func TestHandleProxyBackendKeyDoesNotOverrideClientKeyWhenEmpty(t *testing.T) {
 	defer proxy.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
+		strings.NewReader(`{"model":"llm_proxy","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer client-key")
 	resp, err := proxy.Client().Do(req)
@@ -517,7 +517,7 @@ func TestHandleProxyStripsVersionPrefixWhenBackendHasV1(t *testing.T) {
 		gotPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `{"model":"llm_prox","usage":{}}`)
+		_, _ = io.WriteString(w, `{"model":"llm_proxy","usage":{}}`)
 	}))
 	defer backend.Close()
 
@@ -557,7 +557,7 @@ func TestHandleProxyStripsVersionPrefixWhenBackendHasV1(t *testing.T) {
 	defer proxy.Close()
 
 	resp, err := proxy.Client().Post(proxy.URL+"/v1/chat/completions", "application/json",
-		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
+		strings.NewReader(`{"model":"llm_proxy","messages":[]}`))
 	if err != nil {
 		t.Fatalf("proxy post: %v", err)
 	}
@@ -596,7 +596,7 @@ func TestBuildProxyPath(t *testing.T) {
 func doGoClawProxy(t *testing.T, proxyURL, ua string) int {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, proxyURL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
+		strings.NewReader(`{"model":"llm_proxy","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
@@ -677,7 +677,7 @@ func TestGoClawNoToolCallBackend(t *testing.T) {
 	defer proxy.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
+		strings.NewReader(`{"model":"llm_proxy","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "GoClaw/2.1")
 	resp, err := http.DefaultClient.Do(req)
@@ -724,7 +724,7 @@ func newRoutingTestServer(t *testing.T, backends []config.BackendConfig, routing
 func doRoutingProxy(t *testing.T, proxyURL, ua string, headers map[string]string, want int) {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodPost, proxyURL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
+		strings.NewReader(`{"model":"llm_proxy","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
@@ -855,7 +855,7 @@ func TestRoutingRuleEmptyPool(t *testing.T) {
 	defer proxy.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
+		strings.NewReader(`{"model":"llm_proxy","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Ghost/1.0")
 	resp, err := http.DefaultClient.Do(req)
@@ -921,7 +921,7 @@ func waitForRecords(t *testing.T, svc *Server, n int, wantStatus int) []model.Re
 func postCompletion(t *testing.T, proxyURL string, extraHeaders map[string]string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, proxyURL+"/v1/completions",
-		strings.NewReader(`{"model":"llm_prox","prompt":"hi"}`))
+		strings.NewReader(`{"model":"llm_proxy","prompt":"hi"}`))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -1147,7 +1147,7 @@ func TestGoClawFailoverStaysInToolCallPool(t *testing.T) {
 	defer proxy.Close()
 
 	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions",
-		strings.NewReader(`{"model":"llm_prox","messages":[]}`))
+		strings.NewReader(`{"model":"llm_proxy","messages":[]}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "GoClaw/2.1")
 	resp, err := http.DefaultClient.Do(req)

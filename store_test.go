@@ -165,6 +165,84 @@ func TestGetStatsAggregatesRollingAndLifetime(t *testing.T) {
 	}
 }
 
+func TestGetStatsTokenBreakdown(t *testing.T) {
+	svc, _, cleanup := newTestServer(t, "http://example.invalid")
+	defer cleanup()
+
+	now := time.Now().UTC()
+	records := []model.RequestRecord{
+		{
+			ID:                 "qwen-1",
+			CreatedAt:          now.Add(-10 * time.Minute),
+			Method:             http.MethodPost,
+			Path:               "/v1/chat/completions",
+			Model:              "qwen",
+			StatusCode:         http.StatusOK,
+			RequestBytes:       100,
+			ResponseBytes:      200,
+			PromptTokens:       100,
+			CachedPromptTokens: 60,
+			CompletionTokens:   40,
+			TotalTokens:        140,
+			IsStreaming:        false,
+		},
+		{
+			ID:                 "deepseek-1",
+			CreatedAt:          now.Add(-20 * time.Minute),
+			Method:             http.MethodPost,
+			Path:               "/v1/chat/completions",
+			Model:              "deepseek",
+			StatusCode:         http.StatusOK,
+			RequestBytes:       100,
+			ResponseBytes:      200,
+			PromptTokens:       50,
+			CachedPromptTokens: 10,
+			CompletionTokens:   10,
+			TotalTokens:        60,
+			IsStreaming:        false,
+		},
+	}
+	for _, rec := range records {
+		if err := seedRequest(t, svc, rec); err != nil {
+			t.Fatalf("seed request %s: %v", rec.ID, err)
+		}
+	}
+
+	stats, err := svc.store.GetStats(model.RequestFilter{TimeFrom: now.Add(-24 * time.Hour), TimeTo: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("get stats: %v", err)
+	}
+	if stats["total_prompt_tokens"].(int64) != 150 {
+		t.Fatalf("total_prompt_tokens=%v", stats["total_prompt_tokens"])
+	}
+	if stats["total_cached_tokens"].(int64) != 70 {
+		t.Fatalf("total_cached_tokens=%v", stats["total_cached_tokens"])
+	}
+	if stats["total_input_tokens"].(int64) != 80 {
+		t.Fatalf("total_input_tokens=%v", stats["total_input_tokens"])
+	}
+	if got := stats["cache_hit_pct"].(float64); got < 46 || got > 47 {
+		t.Fatalf("cache_hit_pct=%v", got)
+	}
+	if stats["lifetime_cached_tokens"].(int64) != 70 {
+		t.Fatalf("lifetime_cached_tokens=%v", stats["lifetime_cached_tokens"])
+	}
+
+	byModel, ok := stats["token_by_model"].([]map[string]any)
+	if !ok || len(byModel) != 2 {
+		t.Fatalf("token_by_model=%v", stats["token_by_model"])
+	}
+	if byModel[0]["model"].(string) != "qwen" {
+		t.Fatalf("first model=%v (expected qwen, largest by tokens)", byModel[0]["model"])
+	}
+	if byModel[0]["input_tokens"].(int64) != 40 || byModel[0]["cached_tokens"].(int64) != 60 {
+		t.Fatalf("qwen breakdown=%v", byModel[0])
+	}
+	if got := byModel[0]["cache_hit_pct"].(float64); got < 60 || got > 60.01 {
+		t.Fatalf("qwen cache_hit_pct=%v", got)
+	}
+}
+
 func TestGetStatsIgnoresLiveRequestsInErrors(t *testing.T) {
 	svc, _, cleanup := newTestServer(t, "http://example.invalid")
 	defer cleanup()

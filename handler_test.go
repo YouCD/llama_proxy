@@ -44,7 +44,7 @@ func TestHandleRawReturnsSavedPayload(t *testing.T) {
 func TestHandleModels(t *testing.T) {
 	backends := []config.BackendConfig{
 		{Name: "qwen", URL: "http://gpu-1:8080", Weight: 1, Model: "qwen3.8"},
-		{Name: "llm_proxy", URL: "http://proxy:8080", Weight: 1},
+		{Name: "llm_proxyy", URL: "http://proxy:8080", Weight: 1},
 	}
 	cfg := config.Config{
 	}
@@ -73,10 +73,10 @@ func TestHandleModels(t *testing.T) {
 	if payload.Object != "list" {
 		t.Fatalf("object=%q", payload.Object)
 	}
-	// 返回占位模型 llm_prox + 已配置的具体模型 ID（qwen 后端部署 qwen3.8；
-	// llm_proxy 后端未配置 model，不出现）。
-	if len(payload.Data) != 2 || payload.Data[0].ID != "llm_prox" || payload.Data[1].ID != "qwen3.8" {
-		t.Fatalf("expected llm_prox + qwen3.8, got %+v", payload.Data)
+	// 返回占位模型 llm_proxy + 已配置的具体模型 ID（qwen 后端部署 qwen3.8；
+	// llm_proxyy 后端未配置 model，不出现）。
+	if len(payload.Data) != 2 || payload.Data[0].ID != "llm_proxy" || payload.Data[1].ID != "qwen3.8" {
+		t.Fatalf("expected llm_proxy + qwen3.8, got %+v", payload.Data)
 	}
 }
 

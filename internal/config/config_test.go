@@ -256,7 +256,7 @@ func LoadYAMLForTest(t *testing.T, content string) error {
 }
 
 // TestLoadYAMLConfigSchedulingValidation 验证调度启动校验：配置了 command 但缺
-// model / readiness_url 时报错；模型 ID 与 backends.list 重复或与 llm_prox 冲突时报错。
+// model / readiness_url 时报错；模型 ID 与 backends.list 重复或与 llama_proxy 冲突时报错。
 func TestLoadYAMLConfigSchedulingValidation(t *testing.T) {
 	writeAndLoad := func(content string) error {
 		return LoadYAMLForTest(t, content)
@@ -317,7 +317,7 @@ scheduling:
 	err = writeAndLoad(`
 scheduling:
   coding:
-    model: "llm_prox"
+    model: "llama_proxy"
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8080"
   background:
@@ -325,7 +325,7 @@ scheduling:
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8080"
 `)
-	if err == nil || !strings.Contains(err.Error(), "llm_prox") {
+	if err == nil || !strings.Contains(err.Error(), "llama_proxy") {
 		t.Fatalf("expected proxy-id conflict error, got %v", err)
 	}
 }

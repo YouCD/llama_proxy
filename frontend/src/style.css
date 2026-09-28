@@ -4,7 +4,7 @@
   --app-bg: #f6f7f9;
   --app-panel: #ffffff;
   --app-line: #e5e7eb;
-  --app-text: #111827;
+  --app-text: #000000;
   --app-muted: #6b7280;
   --app-accent: #2563eb;
   --app-ok: #16a34a;
@@ -164,7 +164,7 @@ html:not(.dark) .panel:hover {
 .section-title {
   font-size: 13px;
   font-weight: 700;
-  color: var(--app-muted);
+  color: var(--app-text);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   margin-bottom: 12px;
@@ -177,7 +177,7 @@ html:not(.dark) .panel:hover {
 .daily-heading {
   font-size: 13px;
   font-weight: 700;
-  color: var(--app-muted);
+  color: var(--app-text);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   margin: 0 0 12px;
@@ -350,6 +350,21 @@ html:not(.dark) .stat-card:hover {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+/* 细滚动条，与 Token 构成面板一致 */
+.backend-list::-webkit-scrollbar {
+  width: 6px;
+}
+.backend-list::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.35);
+  border-radius: 3px;
+}
+.backend-list::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .backend-bar {
