@@ -9,13 +9,14 @@ import (
 	"strings"
 	"time"
 
+	"llama_proxy/internal/config"
+
 	"github.com/glebarez/sqlite"
 	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/youcd/toolkit/log"
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"llama_proxy/internal/config"
 
 	"gorm.io/gorm/logger"
 )
@@ -32,7 +33,7 @@ func CloseDatabase(db Database) error {
 	return sqlDB.Close()
 }
 
-// isPostgresDB 判断 GORM 句柄底层是否为 PostgreSQL。
+// IsPostgresDB 判断 GORM 句柄底层是否为 PostgreSQL。
 func IsPostgresDB(db Database) bool {
 	return db.Dialector.Name() == "postgres"
 }

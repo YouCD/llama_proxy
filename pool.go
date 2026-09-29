@@ -49,34 +49,30 @@ func (s *Server) schedulerForwardBC() *config.BackendConfig {
 // localBackgroundBackendName 是本地 background 模型进程在代理池中的节点名。
 const localBackgroundBackendName = "local-background"
 
-// syncLocalBackendNode 将本地 background 模型进程的就绪状态同步到代理池：
-// 就绪时作为后端节点入池（与 backends.list 一起参与负载均衡）；
-// 未就绪（coding 进行中/启动中/崩溃）时出池。仅状态变化时重建池。
+// syncLocalBackendNode 将本地模型进程的就绪状态同步到代理池：
+// 当前加载的是 background 模式模型且就绪时，作为后端节点入池（与 backends.list
+// 一起参与负载均衡）；coding 模式（不加入代理池）/未就绪（启动中/崩溃）时出池。
+// 仅状态变化时重建池。
 func (s *Server) syncLocalBackendNode() {
-	_, yamlCfg := s.snapshot()
-	if s.balancer == nil || s.scheduler == nil || yamlCfg == nil || yamlCfg.Scheduling == nil {
+	if s.balancer == nil || s.scheduler == nil {
 		return
 	}
-	base, ready := s.scheduler.BackgroundReady()
+	node, ready := s.scheduler.LocalNode()
 	if ready == s.localNodeInPool {
 		return
 	}
 	s.localNodeInPool = ready
 	merged := make([]config.BackendConfig, 0, len(s.staticBackends)+1)
 	merged = append(merged, s.staticBackends...)
-	if ready && base != "" {
-		w := yamlCfg.Scheduling.Background.Weight
-		if w <= 0 {
-			w = 1
-		}
+	if ready && node.BaseURL != "" {
 		merged = append(merged, config.BackendConfig{
 			Name:   localBackgroundBackendName,
-			URL:    base,
-			Weight: w,
-			Tags:   yamlCfg.Scheduling.Background.Tags,
-			APIKey: yamlCfg.Scheduling.Background.APIKey,
-			// 固化 background 模型的模型 ID：请求该 ID 时可经 GetBackendByModel 反查到本地节点直连。
-			Model: yamlCfg.Scheduling.Background.Model,
+			URL:    node.BaseURL,
+			Weight: node.Weight,
+			Tags:   node.Tags,
+			APIKey: node.APIKey,
+			// 当前 background 模型的模型 ID：请求该 ID 时可经 GetBackendByModel 反查到本地节点直连。
+			Model: node.ModelID,
 		})
 	}
 	s.balancer.Update(merged)

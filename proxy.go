@@ -408,13 +408,13 @@ func statusErrf(code int, format string, args ...any) error {
 // 按请求体中的模型 ID 分派：
 //
 //   - 模型 ID 为 llm_proxy（或空）：默认轮询模型列表——命中 routing 规则（若配置）时
-//     只从规则 pool 标签对应的后端子池（含本地 background 节点）选择；其余流量统一
-//     落入全量代理池（backends.list + 本地 background 节点，本地节点随就绪状态动态
+//     只从规则 pool 标签对应的后端子池（含本地节点）选择；其余流量统一
+//     落入全量代理池（backends.list + 本地节点，本地节点随就绪状态动态
 //     入池/出池，见 syncLocalBackendNode）。请求失败时自动转移到池内下一个未尝试的
 //     后端；
 //   - 模型 ID 为具体名称：直连部署该模型的后端（backends.list）或本地调度进程
-//     （coding/background，未就绪则启动并等待，并续期租约），单后端、不可故障转移；
-//     未找到部署该模型的后端/进程时返回 400。
+//     （scheduling 模型条目，未就绪则启动并等待，coding 模式续期租约），
+//     单后端、不可故障转移；未找到部署该模型的后端/进程时返回 400。
 func (s *Server) selectBackend(w http.ResponseWriter, r *http.Request, ctx context.Context, reqModel string) (*backendCandidate, string, func(map[string]bool) *backendCandidate, error) {
 	// 具体模型 ID：直连对应后端/本地进程（不使用 routing 规则）。
 	if reqModel != "" && reqModel != ProxyModelID {
@@ -467,62 +467,54 @@ func (s *Server) selectBackend(w http.ResponseWriter, r *http.Request, ctx conte
 }
 
 // selectSpecificBackend 按具体模型 ID 直连部署该模型的目标：
-//  1. 本地 coding 进程（请求其固化模型 ID 时启动/切换并等待就绪，同时续期开发租约）；
-//  2. 代理池内声明该模型的后端（backends.list 与就绪的本地 background 节点，
-//     经 GetBackendByModel 反查，模型 ID 唯一性由启动时校验保证）；
-//  3. 未就绪的本地 background 进程（启动并等待就绪；coding 租约仍活跃时进程被占用，
-//     返回 503）。
+//  1. 本地调度进程（scheduling 模型条目，请求该模型 ID 时启动/切换并等待就绪，
+//     coding 模式同时续期开发租约；background 条目在 coding 租约仍活跃时进程被
+//     占用，返回 503）；
+//  2. 代理池内声明该模型的后端（backends.list 与就绪的本地节点，
+//     经 GetBackendByModel 反查，模型 ID 唯一性由启动时校验保证）。
 func (s *Server) selectSpecificBackend(r *http.Request, ctx context.Context, reqModel string) (*backendCandidate, error) {
 	sc := s.schedulingConfig()
-	if sc != nil && reqModel == sc.Coding.Model {
-		return s.selectCodingBackend(ctx, reqModel)
+	if sc != nil && s.scheduler != nil {
+		if entry := sc.Entry(reqModel); entry != nil {
+			return s.selectScheduledModel(ctx, reqModel, entry)
+		}
 	}
 	if s.balancer != nil {
 		if b := s.balancer.GetBackendByModel(reqModel); b != nil {
 			return candidateOf(b), nil
 		}
 	}
-	if sc != nil && reqModel == sc.Background.Model && s.scheduler != nil {
-		if s.scheduler.IsCodingActive() {
-			return nil, statusErrf(http.StatusServiceUnavailable,
-				"model %q not ready: coding model is active (lease), retry later", reqModel)
-		}
-		ready, rerr := s.scheduler.EnsureBackground(ctx)
-		if rerr != nil {
-			return nil, rerr
-		}
-		select {
-		case <-ready:
-		case <-ctx.Done():
-			return nil, fmt.Errorf("timed out waiting for background model ready")
-		}
-		base := s.scheduler.ActiveBaseURL()
-		if base == "" {
-			return nil, fmt.Errorf("background model not ready")
-		}
-		return &backendCandidate{url: strings.TrimRight(base, "/"), cfg: s.schedulerForwardBC()}, nil
-	}
 	return nil, fmt.Errorf("unknown model %q: use %q for load-balanced routing or one of the configured model ids", reqModel, ProxyModelID)
 }
 
-// selectCodingBackend 把请求路由到本地 coding 进程：未就绪则启动并等待，同时续期租约。
-func (s *Server) selectCodingBackend(ctx context.Context, reqModel string) (*backendCandidate, error) {
-	s.scheduler.TouchCoding()
-	s.pushSchedEvent("coding_request", map[string]any{"model": reqModel})
-	ready, rerr := s.scheduler.EnsureCoding(ctx)
+// selectScheduledModel 把请求路由到指定模型的本地调度进程：未就绪则触发切换并等待；
+// coding 模式流量续期开发租约并广播事件；background 模式请求在 coding 租约仍活跃时
+// 被拒（503），保护正在使用的 coding 进程。
+func (s *Server) selectScheduledModel(ctx context.Context, modelID string, entry *config.ProcessConfig) (*backendCandidate, error) {
+	if entry.Mode == config.ModeCoding {
+		s.scheduler.TouchCoding()
+		s.pushSchedEvent("coding_request", map[string]any{"model": modelID})
+	}
+	if entry.Mode == config.ModeBackground && s.scheduler.IsCodingActive() {
+		return nil, statusErrf(http.StatusServiceUnavailable,
+			"model %q not ready: coding model is active (lease), retry later", modelID)
+	}
+	ready, rerr := s.scheduler.EnsureModel(ctx, modelID)
 	if rerr != nil {
 		return nil, rerr
 	}
 	select {
 	case <-ready:
 	case <-ctx.Done():
-		return nil, fmt.Errorf("timed out waiting for coding model ready")
+		return nil, fmt.Errorf("timed out waiting for model %s ready", modelID)
 	}
 	base := s.scheduler.ActiveBaseURL()
 	if base == "" {
-		return nil, fmt.Errorf("coding model not ready")
+		return nil, fmt.Errorf("model %s not ready", modelID)
 	}
-	s.scheduler.TouchCoding()
+	if entry.Mode == config.ModeCoding {
+		s.scheduler.TouchCoding()
+	}
 	return &backendCandidate{url: strings.TrimRight(base, "/"), cfg: s.schedulerForwardBC()}, nil
 }
 

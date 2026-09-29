@@ -152,11 +152,17 @@ func (s *Server) enrichBackendMeta(items []map[string]any) {
 		}
 		meta[b.URL] = map[string]any{"model": b.Model, "tags": sortedTagList(b.EffectiveTags())}
 	}
-	// 本地 background 节点就绪时同样附带标签（模型名不在配置里，置空）。
-	if yamlCfg.Scheduling != nil && s.scheduler != nil {
-		if base, ready := s.scheduler.BackgroundReady(); ready && base != "" {
-			if _, ok := meta[base]; !ok {
-				meta[base] = map[string]any{"model": "", "tags": sortedTagList(yamlCfg.Scheduling.Background.EffectiveTags())}
+	// 本地节点就绪时同样附带模型与标签（当前加载的 background 模式模型）。
+	if s.scheduler != nil {
+		if node, ready := s.scheduler.LocalNode(); ready && node.BaseURL != "" {
+			if _, ok := meta[node.BaseURL]; !ok {
+				tags := make(map[string]bool, len(node.Tags))
+				for _, t := range node.Tags {
+					if t = strings.TrimSpace(t); t != "" {
+						tags[t] = true
+					}
+				}
+				meta[node.BaseURL] = map[string]any{"model": node.ModelID, "tags": sortedTagList(tags)}
 			}
 		}
 	}
@@ -403,6 +409,7 @@ func (s *Server) schedulerStatus() map[string]any {
 
 	status := map[string]any{
 		"enabled":         true,
+		"model":           snap.Model,
 		"mode":            snap.Mode,
 		"ready":           snap.Ready,
 		"coding_active":   s.scheduler.IsCodingActive(),
@@ -460,8 +467,9 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			add(yamlCfg.Backends.List[i].Model)
 		}
 		if sc := yamlCfg.Scheduling; sc != nil {
-			add(sc.Coding.Model)
-			add(sc.Background.Model)
+			for id := range sc.Models {
+				add(id)
+			}
 		}
 	}
 	data := make([]obj, 0, len(ids))

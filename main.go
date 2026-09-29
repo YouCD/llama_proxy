@@ -33,37 +33,42 @@ func main() {
 
 	log.Init(&log.Config{Stdout: true})
 
+	// 捕获 SIGINT / SIGTERM，用于优雅起停。提前到启动最前端创建，
+	// 使后续启动步骤的日志统一使用 ctx（早期启动阶段也能捕获信号）。
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	yamlCfg, err := config.Load(configPath)
 	if err != nil {
-		log.WithCtx(nil).Fatalf("load yaml config %s: %v", configPath, err)
+		log.WithCtx(ctx).Fatalf("load yaml config %s: %v", configPath, err)
 	}
 
 	cfg := yamlCfg.ToLegacy()
 	log.SetLogLevel(cfg.LogLevel)
 	if len(yamlCfg.Backends.List) == 0 && !yamlCfg.HasScheduling() {
-		log.WithCtx(nil).Fatal("no enabled backend in backends.list")
+		log.WithCtx(ctx).Fatal("no enabled backend in backends.list")
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
-		log.WithCtx(nil).Fatalf("mkdir data dir: %v", err)
+		log.WithCtx(ctx).Fatalf("mkdir data dir: %v", err)
 	}
 
 	database, err := db.NewDatabase(yamlCfg.Database, cfg.DataDir, cfg.LogLevel)
 	if err != nil {
-		log.WithCtx(nil).Fatalf("open db: %v", err)
+		log.WithCtx(ctx).Fatalf("open db: %v", err)
 	}
 	defer db.CloseDatabase(database)
 
 	dbType := yamlCfg.Database.Type
 	if err := db.InitDB(database, dbType); err != nil {
-		log.WithCtx(nil).Fatalf("init db: %v", err)
+		log.WithCtx(ctx).Fatalf("init db: %v", err)
 	}
 
 	st := store.New(database, cfg.DataDir, cfg.RetentionDays)
 	if err := st.Normalize(); err != nil {
-		log.WithCtx(nil).Fatalf("normalize db: %v", err)
+		log.WithCtx(ctx).Fatalf("normalize db: %v", err)
 	}
 	if err := st.RepairStuckRequests(); err != nil {
-		log.WithCtx(nil).Infof("repair stuck requests failed: %v", err)
+		log.WithCtx(ctx).Infof("repair stuck requests failed: %v", err)
 	}
 
 	// 调度模式下本地 background 进程会作为动态节点加入代理池，因此即使 backends.list 为空也要建 balancer。
@@ -72,7 +77,7 @@ func main() {
 		backendBalancer = balancer.New(yamlCfg.Backends.List, yamlCfg.Backends.Strategy)
 		// 池初始化/变更（如本地 background 节点入池/出池）时打印各池成员、权重与 strategy。
 		backendBalancer.SetLogger(func(format string, args ...any) {
-			log.WithCtx(nil).Infof(format, args...)
+			log.WithCtx(ctx).Infof(format, args...)
 		})
 		backendBalancer.LogPools()
 	}
@@ -110,12 +115,10 @@ func main() {
 		s.scheduler = scheduler
 	}
 
-	// 捕获 SIGINT / SIGTERM，用于优雅起停。
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 	if s.scheduler != nil {
-		log.WithCtx(ctx).Infof("process scheduler enabled: coding_idle_timeout=%s drain=%s kill=%s startup=%s",
-			yamlCfg.Scheduling.Lease.CodingIdleTimeout, yamlCfg.Scheduling.Switch.DrainTimeout, yamlCfg.Scheduling.Switch.KillTimeout, yamlCfg.Scheduling.Switch.StartupTimeout)
+		defaultBG, _ := yamlCfg.Scheduling.DefaultBackground()
+		log.WithCtx(ctx).Infof("process scheduler enabled: models=%d default_background=%q coding_idle_timeout=%s drain=%s kill=%s startup=%s",
+			len(yamlCfg.Scheduling.Models), defaultBG, yamlCfg.Scheduling.Lease.CodingIdleTimeout, yamlCfg.Scheduling.Switch.DrainTimeout, yamlCfg.Scheduling.Switch.KillTimeout, yamlCfg.Scheduling.Switch.StartupTimeout)
 	}
 	go st.CleanupLoop(ctx)
 	// 配置文件动态加载：变更时热更新可动态项，不可热更新项保留旧值并提示重启。

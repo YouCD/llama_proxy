@@ -70,13 +70,13 @@ func newPoolTestServer(t *testing.T, cfg *config.SchedulingConfig, staticBackend
 
 	svc := &Server{
 		cfg: config.Config{
-			ListenAddr:          ":0",
-			DataDir:             dataDir,
-			MaxRequestBytes:     2 << 20,
-			MaxCaptureBytes:     2 << 20,
-			RequestTimeout:      15 * time.Second,
-			RecordPaths:         []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
-			APIKey:              "client-key",
+			ListenAddr:      ":0",
+			DataDir:         dataDir,
+			MaxRequestBytes: 2 << 20,
+			MaxCaptureBytes: 2 << 20,
+			RequestTimeout:  15 * time.Second,
+			RecordPaths:     []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
+			APIKey:          "client-key",
 		},
 		yamlCfg:        &config.YAMLConfig{Scheduling: cfg, Backends: config.BackendsConfig{Strategy: strategy}},
 		store:          st,
@@ -90,13 +90,12 @@ func newPoolTestServer(t *testing.T, cfg *config.SchedulingConfig, staticBackend
 	return svc
 }
 
-// testDo 经代理发起一次 chat 请求，返回状态码。coding=true 时请求 coding 固化的模型 ID，
-// 否则请求 llm_proxy（轮询代理池）。
-func (s *Server) testDo(t *testing.T, proxyURL string, coding bool) int {
+// testDo 经代理发起一次指定模型 ID 的 chat 请求，返回状态码。
+// model 传 ProxyModelID（或空串）时走轮询代理池。
+func (s *Server) testDo(t *testing.T, proxyURL string, model string) int {
 	t.Helper()
-	model := ProxyModelID
-	if coding {
-		model = s.yamlCfg.Scheduling.Coding.Model
+	if model == "" {
+		model = ProxyModelID
 	}
 	req, _ := http.NewRequest(http.MethodPost, proxyURL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"`+model+`","messages":[]}`))
@@ -120,16 +119,9 @@ func TestHandleProxySchedulerPool(t *testing.T) {
 	defer remote.Close()
 
 	cfg := &config.SchedulingConfig{
-		Coding: config.ProcessConfig{
-			Model:        "qwen3.8",
-			ReadinessURL: local.URL,
-			APIKey:       "coding-key",
-		},
-		Background: config.ProcessConfig{
-			Model:        "qwen3.6",
-			ReadinessURL: local.URL,
-			APIKey:       "bg-key",
-			Weight:       2,
+		Models: map[string]config.ProcessConfig{
+			"qwen3.8": {Mode: config.ModeCoding, ReadinessURL: local.URL, APIKey: "coding-key"},
+			"qwen3.6": {Mode: config.ModeBackground, ReadinessURL: local.URL, APIKey: "bg-key", Weight: 2},
 		},
 	}
 	staticBackends := []config.BackendConfig{
@@ -146,7 +138,7 @@ func TestHandleProxySchedulerPool(t *testing.T) {
 
 	// wrr 权重 2:1 → 6 个非 coding 请求应严格分为 local:4 / remote:2。
 	for i := 0; i < 6; i++ {
-		if code := svc.testDo(t, proxy.URL, false); code != http.StatusOK {
+		if code := svc.testDo(t, proxy.URL, ProxyModelID); code != http.StatusOK {
 			t.Fatalf("non-coding request #%d status=%d, want 200", i, code)
 		}
 	}
@@ -177,15 +169,9 @@ func TestHandleProxySchedulerCodingPool(t *testing.T) {
 	defer remote.Close()
 
 	cfg := &config.SchedulingConfig{
-		Coding: config.ProcessConfig{
-			Model:        "qwen3.8",
-			ReadinessURL: local.URL,
-			APIKey:       "coding-key",
-		},
-		Background: config.ProcessConfig{
-			Model:        "qwen3.6",
-			ReadinessURL: local.URL,
-			APIKey:       "bg-key",
+		Models: map[string]config.ProcessConfig{
+			"qwen3.8": {Mode: config.ModeCoding, ReadinessURL: local.URL, APIKey: "coding-key"},
+			"qwen3.6": {Mode: config.ModeBackground, ReadinessURL: local.URL, APIKey: "bg-key"},
 		},
 	}
 	staticBackends := []config.BackendConfig{
@@ -201,7 +187,7 @@ func TestHandleProxySchedulerCodingPool(t *testing.T) {
 	defer proxy.Close()
 
 	// coding 请求打到本地 coding 进程。
-	if code := svc.testDo(t, proxy.URL, true); code != http.StatusOK {
+	if code := svc.testDo(t, proxy.URL, "qwen3.8"); code != http.StatusOK {
 		t.Fatalf("coding request status=%d, want 200", code)
 	}
 
@@ -213,7 +199,7 @@ func TestHandleProxySchedulerCodingPool(t *testing.T) {
 
 	// 非 coding 请求只去 remote。
 	for i := 0; i < 2; i++ {
-		if code := svc.testDo(t, proxy.URL, false); code != http.StatusOK {
+		if code := svc.testDo(t, proxy.URL, ProxyModelID); code != http.StatusOK {
 			t.Fatalf("non-coding request #%d status=%d, want 200", i, code)
 		}
 	}
@@ -250,15 +236,9 @@ func TestHandleProxySchedulerKeyIsolation(t *testing.T) {
 	defer backend.Close()
 
 	cfg := &config.SchedulingConfig{
-		Coding: config.ProcessConfig{
-			Model:        "qwen3.8",
-			ReadinessURL: backend.URL,
-			APIKey:       "coding-key",
-		},
-		Background: config.ProcessConfig{
-			Model:        "qwen3.6",
-			ReadinessURL: backend.URL,
-			APIKey:       "bg-key",
+		Models: map[string]config.ProcessConfig{
+			"qwen3.8": {Mode: config.ModeCoding, ReadinessURL: backend.URL, APIKey: "coding-key"},
+			"qwen3.6": {Mode: config.ModeBackground, ReadinessURL: backend.URL, APIKey: "bg-key"},
 		},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: time.Second}
@@ -285,13 +265,13 @@ func TestHandleProxySchedulerKeyIsolation(t *testing.T) {
 	var staticBackends []config.BackendConfig
 	svc := &Server{
 		cfg: config.Config{
-			ListenAddr:          ":0",
-			DataDir:             dataDir,
-			MaxRequestBytes:     2 << 20,
-			MaxCaptureBytes:     2 << 20,
-			RequestTimeout:      15 * time.Second,
-			RecordPaths:         []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
-			APIKey:              "client-key",
+			ListenAddr:      ":0",
+			DataDir:         dataDir,
+			MaxRequestBytes: 2 << 20,
+			MaxCaptureBytes: 2 << 20,
+			RequestTimeout:  15 * time.Second,
+			RecordPaths:     []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
+			APIKey:          "client-key",
 		},
 		yamlCfg:        &config.YAMLConfig{Scheduling: cfg},
 		store:          st,
@@ -305,10 +285,9 @@ func TestHandleProxySchedulerKeyIsolation(t *testing.T) {
 	proxy := httptest.NewServer(svc)
 	defer proxy.Close()
 
-	do := func(coding bool) int {
-		model := ProxyModelID
-		if coding {
-			model = cfg.Coding.Model
+	do := func(model string) int {
+		if model == "" {
+			model = ProxyModelID
 		}
 		req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/v1/chat/completions",
 			strings.NewReader(`{"model":"`+model+`","messages":[]}`))
@@ -322,10 +301,10 @@ func TestHandleProxySchedulerKeyIsolation(t *testing.T) {
 		return resp.StatusCode
 	}
 
-	if code := do(false); code != http.StatusOK {
+	if code := do(""); code != http.StatusOK {
 		t.Fatalf("background request status=%d, want 200", code)
 	}
-	if code := do(true); code != http.StatusOK {
+	if code := do("qwen3.8"); code != http.StatusOK {
 		t.Fatalf("coding request status=%d, want 200", code)
 	}
 
@@ -345,17 +324,9 @@ func TestHandleProxySchedulerGoClawBackground(t *testing.T) {
 	defer remote.Close()
 
 	cfg := &config.SchedulingConfig{
-		Coding: config.ProcessConfig{
-			Model:        "qwen3.8",
-			ReadinessURL: local.URL,
-			APIKey:       "coding-key",
-		},
-		Background: config.ProcessConfig{
-			Model:        "qwen3.6",
-			ReadinessURL: local.URL,
-			APIKey:       "bg-key",
-			Weight:       1,
-			Tags:         []string{"tool_call"},
+		Models: map[string]config.ProcessConfig{
+			"qwen3.8": {Mode: config.ModeCoding, ReadinessURL: local.URL, APIKey: "coding-key"},
+			"qwen3.6": {Mode: config.ModeBackground, ReadinessURL: local.URL, APIKey: "bg-key", Weight: 1, Tags: []string{"tool_call"}},
 		},
 	}
 	staticBackends := []config.BackendConfig{

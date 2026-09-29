@@ -10,6 +10,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"time"
 
 	"llama_proxy/internal/balancer"
@@ -73,49 +75,45 @@ func watchConfig(ctx context.Context, s *Server, path string) {
 			}
 			log.WithCtx(ctx).Infof("config watcher error: %v", err)
 		case <-timer.C:
-			s.reloadConfigFrom(path)
+			s.reloadConfigFrom(ctx, path)
 		}
 	}
 }
 
 // reloadConfigFrom 重新读取并校验配置文件，通过后应用新配置。
-func (s *Server) reloadConfigFrom(path string) {
+func (s *Server) reloadConfigFrom(ctx context.Context, path string) {
 	newYaml, err := config.Load(path)
 	if err != nil {
-		log.WithCtx(nil).Errorf("reload config %s failed, keeping current config: %v", path, err)
+		log.WithCtx(ctx).Errorf("reload config %s failed, keeping current config: %v", path, err)
 		return
 	}
-	s.reloadConfig(newYaml.ToLegacy(), newYaml)
+	s.reloadConfig(ctx, newYaml.ToLegacy(), newYaml)
 }
 
-// schedulingLaunch 提取与进程启动相关的调度字段，用于热更新差异检测。
+// schedulingLaunch 提取与进程启动相关的调度字段，用于热更新差异检测：
+// 模型条目（ID/mode/command/readiness_url）与 default 任何变化都需重启；
+// lease/switch 时序可热更新（SetTimings）。
 type schedulingLaunch struct {
-	Command      string
-	Model        string
-	ReadinessURL string
-	BgCommand    string
-	BgModel      string
-	BgReadiness  string
+	Default string
+	Entries []string // 排序后的 "modelID|mode|command|readiness_url"
 }
 
 func processLaunch(sc *config.SchedulingConfig) schedulingLaunch {
 	if sc == nil {
 		return schedulingLaunch{}
 	}
-	return schedulingLaunch{
-		Command:      sc.Coding.Command,
-		Model:        sc.Coding.Model,
-		ReadinessURL: sc.Coding.ReadinessURL,
-		BgCommand:    sc.Background.Command,
-		BgModel:      sc.Background.Model,
-		BgReadiness:  sc.Background.ReadinessURL,
+	out := schedulingLaunch{Default: sc.Default}
+	for id, e := range sc.Models {
+		out.Entries = append(out.Entries, fmt.Sprintf("%s|%s|%s|%s", id, e.Mode, e.Command, e.ReadinessURL))
 	}
+	sort.Strings(out.Entries)
+	return out
 }
 
 // reloadConfig 应用新配置：热更新可动态项，保留并告警不可热更新项。
 // 新配置已通过 config.Load 的全量校验（含模型 ID 全局唯一性），
 // 因此不存在"新后端 model 撞上在服调度进程 ID"的部分生效场景——冲突即整体拒绝。
-func (s *Server) reloadConfig(newLegacy config.Config, newYaml *config.YAMLConfig) {
+func (s *Server) reloadConfig(ctx context.Context, newLegacy config.Config, newYaml *config.YAMLConfig) {
 	oldLegacy, oldYaml := s.snapshot()
 
 	// 1) 检测无法热更新的项：保留旧值并记日志。
@@ -135,8 +133,8 @@ func (s *Server) reloadConfig(newLegacy config.Config, newYaml *config.YAMLConfi
 	if newLegacy.PollInterval != oldLegacy.PollInterval {
 		restart = append(restart, "proxy.poll_interval_seconds")
 	}
-	if oldL, newL := processLaunch(oldYaml.Scheduling), processLaunch(newYaml.Scheduling); oldL != newL {
-		restart = append(restart, "scheduling.coding/background (command/model/readiness_url)")
+	if !sameSchedulingLaunch(processLaunch(oldYaml.Scheduling), processLaunch(newYaml.Scheduling)) {
+		restart = append(restart, "scheduling (model entries/mode/command/readiness_url/default)")
 	}
 
 	// 2) 发布并应用可热更新部分。
@@ -155,7 +153,7 @@ func (s *Server) reloadConfig(newLegacy config.Config, newYaml *config.YAMLConfi
 		// 启动时是纯调度模式（无静态后端池），新配置加入了 backends：现场建池。
 		s.balancer = balancer.New(newYaml.Backends.List, newYaml.Backends.Strategy)
 		s.balancer.SetLogger(func(format string, args ...any) {
-			log.WithCtx(nil).Infof(format, args...)
+			log.WithCtx(ctx).Infof(format, args...)
 		})
 		s.balancer.LogPools()
 	}
@@ -169,13 +167,26 @@ func (s *Server) reloadConfig(newLegacy config.Config, newYaml *config.YAMLConfi
 		"restart_required": restart,
 	})
 	if len(restart) == 0 {
-		log.WithCtx(nil).Infof("config reloaded")
+		log.WithCtx(ctx).Infof("config reloaded")
 	} else {
 		for _, k := range restart {
-			log.WithCtx(nil).Warnf("config %s changed but cannot be hot-reloaded, restart required (old value kept)", k)
+			log.WithCtx(ctx).Warnf("config %s changed but cannot be hot-reloaded, restart required (old value kept)", k)
 		}
-		log.WithCtx(nil).Infof("config reloaded (%d restart-required change(s))", len(restart))
+		log.WithCtx(ctx).Infof("config reloaded (%d restart-required change(s))", len(restart))
 	}
+}
+
+// sameSchedulingLaunch 判断新旧调度进程启动参数是否一致（含切片字段，不能直接 ==）。
+func sameSchedulingLaunch(a, b schedulingLaunch) bool {
+	if a.Default != b.Default || len(a.Entries) != len(b.Entries) {
+		return false
+	}
+	for i := range a.Entries {
+		if a.Entries[i] != b.Entries[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // sameDatabase 判断新旧数据库配置是否一致（值结构体直接比较）。

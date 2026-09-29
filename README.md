@@ -47,28 +47,28 @@ English UI：
 
 | 请求 model | 去向 |
 |---|---|
-| `llm_prox`（或省略） | 默认轮询模型列表：命中路由规则时进入规则 pool 子池，否则进入全量代理池（`backends.list` + 就绪的本地 background 节点），按权重策略负载均衡 |
-| `scheduling.coding.model` | 本地 coding 进程（未启动时自动拉起并等待就绪，并续期开发租约） |
-| `scheduling.background.model` | 本地 background 进程（就绪时即代理池中的 `local-background` 节点直连；未就绪时自动拉起并等待；coding 租约仍活跃时进程被占用，返回 503） |
+| `llm_prox`（或省略） | 默认轮询模型列表：命中路由规则时进入规则 pool 子池，否则进入全量代理池（`backends.list` + 就绪的本地节点），按权重策略负载均衡 |
+| `scheduling` 条目 key（模型 ID） | 本地调度进程：请求哪个模型 ID 就切换到哪个模型（未就绪时自动拉起并等待；coding 模式续期开发租约，background 模式在 coding 租约仍活跃时进程被占用，返回 503） |
 | `backends.list[].model` | 直连部署该模型的后端（单后端，不故障转移） |
 | 未配置的其他模型 ID | 400 错误 |
 
-**模型 ID 唯一性**：启动时校验所有模型 ID（`backends.list[].model` 与 `scheduling.coding/background.model`）互不重复，且不与 `llm_prox` 冲突；重复时拒绝启动，保证具体模型路由无歧义。
+**模型 ID 唯一性**：启动时校验所有模型 ID（`backends.list[].model` 与 `scheduling` 条目 key）互不重复，且不与 `llm_prox` 冲突；重复时拒绝启动，保证具体模型路由无歧义。
 
 配置 `scheduling` 后进入**进程调度模式**，`llm_prox` 流量的代理池构成：
 
 | 条件 | 代理池 |
 |---|---|
-| background 就绪 | `backends.list` + 本地 background 节点，按权重负载均衡 |
-| coding 进行中 / background 未就绪 / 进程崩溃 | `backends.list` |
+| 当前加载的模型为就绪的 background 模式 | `backends.list` + 本地节点（`local-background`），按权重负载均衡 |
+| 当前为 coding 模式 / 本地未就绪 / 进程崩溃 | `backends.list` |
 
 调度细节：
 
-- **coding 进程**：收到 coding 模型流量时由代理按 `scheduling.coding.command` 启动 `llama-server`，轮询 `readiness_url` 直到就绪；客户端请求期间代理注入该进程自己的 `api_key`。
-- **租约**：距最后一次 coding 模型流量超过 `scheduling.lease.coding_idle_timeout`（例 30m）后，代理优雅停掉 coding 进程并切回 background，避免大模型常驻占用显存。
-- **background 节点**：常驻运行（或由代理拉起）。就绪探测通过后以 `scheduling.background.weight`（缺省 1）作为名为 `local-background` 的动态节点加入代理池参与负载均衡；探测失败或进程意外退出时自动出池，恢复就绪后重新入池。
+- **模型条目**：`scheduling` 下以模型 ID 为 key（key 即模型 ID，小写生效），每个条目含 `mode`（`coding` 或 `background`）、`command`、`readiness_url`、`api_key`、`log_file`，background 条目另可用 `weight`/`tags`。coding 与 background 条目均可多个。
+- **单进程共享端口**：同一时刻只有一个本地进程在运行。请求某模型 ID 时，代理按该条目 `command` 启动 `llama-server`（先排空在途请求、杀掉旧进程），轮询 `readiness_url` 直到就绪；客户端请求期间代理注入该进程自己的 `api_key`。
+- **coding 模式（按需）**：收到流量才切换；距最后一次 coding 模型流量超过 `scheduling.lease.coding_idle_timeout`（例 30m）后，代理优雅停掉 coding 进程并切回**默认 background**，避免大模型常驻占用显存。
+- **background 模式（常驻）**：启动时加载**默认 background**（仅一个 background 时隐式为它；多个 background 时必须指定 `scheduling.default`）。就绪后以条目 `weight`（缺省 1）作为名为 `local-background` 的动态节点加入代理池参与负载均衡；探测失败或进程意外退出时自动出池，恢复就绪后重新入池。
 - **切换**：停旧进程前按 `switch.drain_timeout` 优雅排空在途请求，`kill_timeout` 内未退出则强杀；新进程按 `startup_timeout` 等待就绪。
-- **优先级抢占**：coding > background。background 加载（或空闲切回）期间收到 coding 模型流量时，coding 切换直接抢占在途的 background 切换（取消其就绪等待）并立即开始加载 coding，而不是排队等 background 加载完成——两者共用同一端口，background 本来就要先被杀掉；启动时首次 background 加载被抢占不视为致命错误。反之，coding 租约仍活跃时 background 切换会被跳过，不会杀掉正在使用的 coding 进程。
+- **优先级抢占**：coding > background。background 加载（或空闲切回）期间收到 coding 模型流量时，coding 切换直接抢占在途的 background 切换（取消其就绪等待）并立即开始加载 coding，而不是排队等 background 加载完成——两者共用同一端口，background 本来就要先被杀掉；启动时首次 background 加载被抢占不视为致命错误。反之，coding 租约仍活跃时 background 模型请求被拒（503），不会杀掉正在使用的 coding 进程。
 
 ### 路由规则（routing）
 
@@ -76,7 +76,7 @@ English UI：
 
 - 规则按配置顺序评估，**首条命中生效**；
 - 每条规则的 `header` 中所有请求头都必须匹配（AND）：**User-Agent 采用包含匹配**（不区分大小写的子串包含，配置 `GoClaw` 可命中 `GoClaw/2.1 (Windows)`），其余请求头 trim 后精确相等、区分大小写；
-- 命中后请求只从 `tags` 含 `pool` 标签的后端中选择（本地 background 节点可用 `scheduling.background.tags` 携带标签）；请求失败时自动转移到同一标签池内下一个未尝试的后端；
+- 命中后请求只从 `tags` 含 `pool` 标签的后端中选择（本地 background 节点可用 `scheduling` 条目的 `tags` 携带标签）；请求失败时自动转移到同一标签池内下一个未尝试的后端；
 - 未配置 `routing` 时不存在路由规则，全部流量走默认池。
 
 ```yaml

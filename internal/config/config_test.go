@@ -69,8 +69,8 @@ proxy:
 	if len(cfg.Backends.List) != 3 {
 		t.Fatalf("backends=%d", len(cfg.Backends.List))
 	}
-	if cfg.Proxy.RetentionDays != 30 {
-		t.Fatalf("retention_days=%d", cfg.Proxy.RetentionDays)
+	if cfg.Proxy.RetentionDays == nil || *cfg.Proxy.RetentionDays != 30 {
+		t.Fatalf("retention_days=%v", cfg.Proxy.RetentionDays)
 	}
 	if cfg.Proxy.PollBackendMetrics != nil && *cfg.Proxy.PollBackendMetrics {
 		t.Fatal("poll_backend_metrics should be false")
@@ -111,8 +111,27 @@ proxy: {}
 	if cfg.Backends.Strategy != "wrr" {
 		t.Fatalf("strategy=%q", cfg.Backends.Strategy)
 	}
-	if cfg.Proxy.RetentionDays != 14 {
-		t.Fatalf("retention_days=%d", cfg.Proxy.RetentionDays)
+	if cfg.Proxy.RetentionDays == nil || *cfg.Proxy.RetentionDays != 14 {
+		t.Fatalf("retention_days=%v", cfg.Proxy.RetentionDays)
+	}
+}
+
+// TestLoadYAMLConfigRetentionZero 验证显式 retention_days: 0 表示永久保留（不被默认值 14 覆盖）。
+func TestLoadYAMLConfigRetentionZero(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if werr := os.WriteFile(path, []byte("server: {}\ndatabase: {}\nbackends: {}\nproxy:\n  retention_days: 0\n"), 0o644); werr != nil {
+		t.Fatalf("write config: %v", werr)
+	}
+	cfg, lerr := Load(path)
+	if lerr != nil {
+		t.Fatalf("load: %v", lerr)
+	}
+	if cfg.Proxy.RetentionDays == nil || *cfg.Proxy.RetentionDays != 0 {
+		t.Fatalf("retention_days=%v, want 0 (permanent)", cfg.Proxy.RetentionDays)
+	}
+	if legacy := cfg.ToLegacy(); legacy.RetentionDays != 0 {
+		t.Fatalf("legacy retention_days=%d, want 0", legacy.RetentionDays)
 	}
 	if !(cfg.Proxy.PollBackendMetrics != nil && *cfg.Proxy.PollBackendMetrics) {
 		t.Fatalf("expected poll_backend_metrics=true")
@@ -139,14 +158,16 @@ backends:
       enabled: true
 proxy: {}
 scheduling:
-  coding:
-    model: "qwen3.8"
+  qwen3.8:
+    mode: coding
     command: "llama-server -m coding.gguf --port 8080"
     readiness_url: "http://127.0.0.1:8080"
-  background:
-    model: "qwen3.6"
+  qwen3.6:
+    mode: background
     command: "llama-server -m bg.gguf --port 8080"
     readiness_url: "http://127.0.0.1:8080"
+    weight: 3
+    tags: ["tool_call"]
   lease:
     coding_idle_timeout: 45m
   switch:
@@ -166,17 +187,17 @@ scheduling:
 	if !cfg.HasScheduling() {
 		t.Fatal("hasScheduling should be true")
 	}
-	if cfg.Scheduling.Coding.Command != "llama-server -m coding.gguf --port 8080" {
-		t.Fatalf("coding command=%q", cfg.Scheduling.Coding.Command)
+	coding := cfg.Scheduling.Entry("qwen3.8")
+	if coding == nil || coding.Mode != ModeCoding || coding.Command != "llama-server -m coding.gguf --port 8080" {
+		t.Fatalf("coding entry=%+v", coding)
 	}
-	if cfg.Scheduling.Coding.Model != "qwen3.8" {
-		t.Fatalf("coding model=%q", cfg.Scheduling.Coding.Model)
+	bg := cfg.Scheduling.Entry("qwen3.6")
+	if bg == nil || bg.Mode != ModeBackground || bg.ReadinessURL != "http://127.0.0.1:8080" || bg.Weight != 3 || !bg.EffectiveTags()["tool_call"] {
+		t.Fatalf("background entry=%+v", bg)
 	}
-	if cfg.Scheduling.Background.Model != "qwen3.6" {
-		t.Fatalf("background model=%q", cfg.Scheduling.Background.Model)
-	}
-	if cfg.Scheduling.Background.ReadinessURL != "http://127.0.0.1:8080" {
-		t.Fatalf("bg readiness=%q", cfg.Scheduling.Background.ReadinessURL)
+	id, def := cfg.Scheduling.DefaultBackground()
+	if id != "qwen3.6" || def == nil {
+		t.Fatalf("default background=(%q, %+v), want qwen3.6", id, def)
 	}
 	if cfg.Scheduling.Lease.CodingIdleTimeout != 45*time.Minute {
 		t.Fatalf("idle timeout=%v", cfg.Scheduling.Lease.CodingIdleTimeout)
@@ -214,12 +235,12 @@ database: {}
 backends: {}
 proxy: {}
 scheduling:
-  coding:
-    model: "coding-model"
+  coding-model:
+    mode: coding
     command: "llama-server -m coding.gguf"
     readiness_url: "http://127.0.0.1:8080"
-  background:
-    model: "bg-model"
+  bg-model:
+    mode: background
     command: "llama-server -m bg.gguf"
     readiness_url: "http://127.0.0.1:8080"
 `
@@ -233,8 +254,11 @@ scheduling:
 	if !cfg.HasScheduling() {
 		t.Fatal("hasScheduling should be true")
 	}
-	if cfg.Scheduling.Coding.Model != "coding-model" || cfg.Scheduling.Background.Model != "bg-model" {
-		t.Fatalf("models=%q/%q", cfg.Scheduling.Coding.Model, cfg.Scheduling.Background.Model)
+	if cfg.Scheduling.Entry("coding-model") == nil || cfg.Scheduling.Entry("bg-model") == nil {
+		t.Fatalf("entries=%v", cfg.Scheduling.Models)
+	}
+	if e := cfg.Scheduling.Entry("bg-model"); e.Weight != 1 {
+		t.Fatalf("default weight=%d, want 1", e.Weight)
 	}
 	if cfg.Scheduling.Lease.CodingIdleTimeout != 30*time.Minute {
 		t.Fatalf("default idle timeout=%v", cfg.Scheduling.Lease.CodingIdleTimeout)
@@ -255,44 +279,50 @@ func LoadYAMLForTest(t *testing.T, content string) error {
 	return err
 }
 
-// TestLoadYAMLConfigSchedulingValidation 验证调度启动校验：配置了 command 但缺
-// model / readiness_url 时报错；模型 ID 与 backends.list 重复或与 llama_proxy 冲突时报错。
+// TestLoadYAMLConfigSchedulingValidation 验证调度启动校验：缺 mode / 非法 mode /
+// 缺 readiness_url 时报错；模型 ID（key）与 backends.list 重复或与 llama_proxy
+// 冲突时报错；多个 background 未指定 default 时报错；default 指向非 background
+// 条目时报错；保留 key 用作模型 ID 时报错。
 func TestLoadYAMLConfigSchedulingValidation(t *testing.T) {
 	writeAndLoad := func(content string) error {
 		return LoadYAMLForTest(t, content)
 	}
 
-	// 缺 model
+	// 缺 mode
 	err := writeAndLoad(`
 scheduling:
-  coding:
+  coding-model:
     command: "llama-server -m coding.gguf"
     readiness_url: "http://127.0.0.1:8080"
-  background:
-    model: "bg-model"
-    command: "llama-server -m bg.gguf"
+`)
+	if err == nil || !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("expected missing-mode error, got %v", err)
+	}
+
+	// 非法 mode
+	err = writeAndLoad(`
+scheduling:
+  coding-model:
+    mode: "hybrid"
+    command: "llama-server"
     readiness_url: "http://127.0.0.1:8080"
 `)
-	if err == nil || !strings.Contains(err.Error(), "model") {
-		t.Fatalf("expected missing-model error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("expected invalid-mode error, got %v", err)
 	}
 
 	// 缺 readiness_url
 	err = writeAndLoad(`
 scheduling:
-  coding:
-    model: "coding-model"
+  coding-model:
+    mode: coding
     command: "llama-server -m coding.gguf"
-  background:
-    model: "bg-model"
-    command: "llama-server -m bg.gguf"
-    readiness_url: "http://127.0.0.1:8080"
 `)
 	if err == nil || !strings.Contains(err.Error(), "readiness_url") {
 		t.Fatalf("expected missing readiness_url error, got %v", err)
 	}
 
-	// 模型 ID 与 backends.list 重复
+	// 模型 ID（key）与 backends.list 重复
 	err = writeAndLoad(`
 backends:
   list:
@@ -300,12 +330,8 @@ backends:
       url: "http://gpu:8080"
       model: "qwen3.8"
 scheduling:
-  coding:
-    model: "qwen3.8"
-    command: "llama-server"
-    readiness_url: "http://127.0.0.1:8080"
-  background:
-    model: "bg-model"
+  qwen3.8:
+    mode: coding
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8080"
 `)
@@ -313,20 +339,99 @@ scheduling:
 		t.Fatalf("expected duplicate model id error, got %v", err)
 	}
 
-	// 模型 ID 与代理占位 ID 冲突
+	// 模型 ID（key）与代理占位 ID 冲突
 	err = writeAndLoad(`
 scheduling:
-  coding:
-    model: "llama_proxy"
-    command: "llama-server"
-    readiness_url: "http://127.0.0.1:8080"
-  background:
-    model: "bg-model"
+  llama_proxy:
+    mode: coding
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8080"
 `)
 	if err == nil || !strings.Contains(err.Error(), "llama_proxy") {
 		t.Fatalf("expected proxy-id conflict error, got %v", err)
+	}
+
+	// 多个 background 未指定 default
+	err = writeAndLoad(`
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+  bg-b:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+`)
+	if err == nil || !strings.Contains(err.Error(), "default") {
+		t.Fatalf("expected missing-default error, got %v", err)
+	}
+
+	// 多个 background 指定 default：合法，且多个 coding 也合法
+	content := `
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+  bg-b:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+  code-a:
+    mode: coding
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+  code-b:
+    mode: coding
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+  default: "bg-b"
+`
+	if err := writeAndLoad(content); err != nil {
+		t.Fatalf("multi coding/background with default should load, got %v", err)
+	}
+
+	// default 指向 coding 条目
+	err = writeAndLoad(`
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+  code-a:
+    mode: coding
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+  default: "code-a"
+`)
+	if err == nil || !strings.Contains(err.Error(), "default") {
+		t.Fatalf("expected default-not-background error, got %v", err)
+	}
+
+	// default 指向不存在的条目
+	err = writeAndLoad(`
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+  default: "no-such-model"
+`)
+	if err == nil || !strings.Contains(err.Error(), "default") {
+		t.Fatalf("expected unknown-default error, got %v", err)
+	}
+
+	// 保留 key 用作模型 ID
+	err = writeAndLoad(`
+scheduling:
+  lease:
+    mode: coding
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+`)
+	if err == nil || !strings.Contains(err.Error(), "保留 key") {
+		t.Fatalf("expected reserved-key error, got %v", err)
 	}
 }
 

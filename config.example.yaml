@@ -59,7 +59,7 @@ backends:
 #      pool: "fast"
 
 proxy:
-  retention_days: 14
+  retention_days: 14  # 数据保留天数；0 表示永久保留（不做清理），未配置默认 14
   max_request_bytes: 33554432  # 32MB
   max_capture_bytes: 33554432  # 32MB
   request_timeout_seconds: 600
@@ -73,39 +73,41 @@ proxy:
     - "/v1/embeddings"
 
 # 进程调度（可选）：配置后启用"模型 ID 驱动的模型进程切换"，未配置则保持纯转发模式。
-# 开启后：请求 coding 固化模型 ID 的流量转发到本地 coding 进程（未启动时自动拉起）；
-# 非 coding 流量统一进入代理池（backends.list + 本地 background 节点，后者就绪时入池参与
-# 负载均衡，未就绪时出池）。所有模型 ID（backends.list 与 scheduling）必须全局唯一，
-# 启动时校验，重复则拒绝启动。
+# 条目以模型 ID 为 key（key 即模型 ID，小写生效）：请求该模型 ID 时切换到对应进程。
+# 同一时刻只有一个本地进程在运行（共享端口）；coding 条目为按需模型（空闲租约到期
+# 切回默认 background），background 条目为常驻模型（启动时加载，就绪后作为动态节点
+# 入代理池参与负载均衡）。coding/background 条目均可多个；多个 background 时必须
+# 指定 default 作为常驻默认。lease/switch/default 为保留 key，不得用作模型 ID。
+# 所有模型 ID（backends.list 与 scheduling）必须全局唯一，启动时校验，重复则拒绝启动。
 #scheduling:
-#  coding:
-#    # 固化模型 ID：请求该模型 ID 时自动启动/切换到 coding 进程（模型 ID 全局唯一）
-#    model: "coding-model"
+#  bg-model:
+#    mode: background   # coding（按需，空闲租约到期切回默认 background）或 background（常驻）
 #    # command 支持多行：每个参数一行，最终拼接为一行命令执行。注意块内不可用 # 注释。
 #    command: >
 #      /usr/local/bin/llama-server
-#      -m /path/to/coding.gguf
-#      --host 0.0.0.0 --port 8080 -c 8192
+#      -m /path/to/bg.gguf
+#      --host 127.0.0.1 --port 8080 -c 8192
 #    # 就绪探测地址：完全按此配置发起 GET（不拼接路径）。
 #    readiness_url: "http://127.0.0.1:8080/v1/models"
 #    # 模型进程自身的 API Key（对应 llama-server 的 --api-key）：
 #    # 就绪探测与代理转发均使用 Authorization: Bearer <key>，客户端 key 与后端 key 隔离
 #    api_key: "your-api-key"
-#    log_file: "./data/coding.log"     # 可选：该模型进程的 stdout/stderr 日志文件
-#  background:
-#    # 固化模型 ID：请求该模型 ID 时自动启动/切换到 background 进程（模型 ID 全局唯一）
-#    model: "background-model"
-#    command: >
-#      /usr/local/bin/llama-server
-#      -m /path/to/background.gguf
-#      --host 0.0.0.0 --port 8080 -c 8192
-#    readiness_url: "http://127.0.0.1:8080/v1/models"
-#    api_key: "your-api-key"   # 模型进程自身的 API Key（对应 --api-key）
 #    weight: 1   # 就绪后作为后端节点加入代理池的权重（与 backends.list 一起负载均衡），未配置按 1
 #    tags: ["fast"]  # 可选：该节点入池后携带的路由标签（routing 规则的 pool 可与之对应）
-#    log_file: "./data/background.log" # 可选：该模型进程的 stdout/stderr 日志文件
+#    log_file: "./data/bg.log"  # 可选：该模型进程的 stdout/stderr 日志文件
+#  coding-model:
+#    mode: coding
+#    command: >
+#      /usr/local/bin/llama-server
+#      -m /path/to/coding.gguf
+#      --host 127.0.0.1 --port 8080 -c 8192
+#    readiness_url: "http://127.0.0.1:8080/v1/models"
+#    api_key: "your-api-key"
+#    log_file: "./data/coding.log"  # 可选：该模型进程的 stdout/stderr 日志文件
+#  # 常驻默认 background：仅一个 background 时隐式为它；多个 background 时必填。
+#  # default: "bg-model"
 #  lease:
-#    # 距最后一次 coding 模型流量超过该时长即切回 background 模型
+#    # 距最后一次 coding 模型流量超过该时长即切回默认 background
 #    coding_idle_timeout: 30m
 #  switch:
 #    drain_timeout: 10s     # 切换前优雅排空在途请求的等待上限

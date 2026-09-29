@@ -4,6 +4,7 @@
     <div class="sched-row">
       <span class="sched-dot" :class="modeDot" :title="modeTitle"></span>
       <span class="sched-mode">{{ modeLabel }}</span>
+      <span class="sched-cell mono" v-if="data.model">{{ data.model }}</span>
       <span class="sched-sep">·</span>
       <span class="sched-ready" :class="readyTone">{{ readyLabel }}</span>
       <span class="sched-sep">·</span>
