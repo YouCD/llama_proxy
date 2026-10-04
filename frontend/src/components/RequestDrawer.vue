@@ -1,5 +1,5 @@
 <template>
-  <el-drawer :model-value="visible" size="min(720px, 94vw)" :with-header="false" @update:model-value="v => $emit('update:visible', v)" @closed="reset">
+  <el-drawer :model-value="visible" size="min(720px, 94vw)" :with-header="false" body-class="req-drawer-body" @update:model-value="v => $emit('update:visible', v)" @closed="reset">
     <div v-if="request" class="drawer-body">
       <div class="head-title">
         <div class="head-main">
@@ -230,8 +230,21 @@ async function onDelete() {
 }
 </script>
 
+<style>
+/* el-drawer 内部元素经 Teleport 渲染,作用域 id 无法穿透,须用 body-class + 非 scoped 样式 */
+.el-drawer__body.req-drawer-body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+</style>
+
 <style scoped>
 .drawer-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   padding: 8px 4px;
 }
 
@@ -428,6 +441,22 @@ async function onDelete() {
 
 .pill-tabs {
   margin-top: 4px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pill-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.pill-tabs :deep(.el-tab-pane) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 .pill-tabs :deep(.el-tabs__nav-wrap::after) {
   display: none;
@@ -508,6 +537,10 @@ async function onDelete() {
 
 .code-block {
   position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 .code-copy {
   position: absolute;
@@ -536,7 +569,8 @@ async function onDelete() {
   border: 1px solid var(--app-line);
   border-radius: 6px;
   padding: 12px 12px 12px 0;
-  max-height: 380px;
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
