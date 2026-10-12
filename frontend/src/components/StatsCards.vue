@@ -50,7 +50,6 @@ const groups = computed(() => {
     {
       title: t('groupFlow'),
       cards: [
-        { key: 'active', label: t('metricActive'), value: s.active_connections || 0, format: fmtNum, foot: t('metricInFlight'), step: 1, tier: 'primary' },
         { key: 'reqhour', label: t('metricReqHour'), value: Math.round((s.requests_per_minute || 0) * 60), format: fmtNum, foot: windowLabel, step: 1, tier: 'primary' },
         { key: 'output', label: t('metricOutputSec'), value: props.outputSec, format: (v) => Math.round(v).toString(), foot: t('metricShownRows'), tier: 'primary' },
       ],
@@ -77,7 +76,14 @@ const allCards = computed(() => groups.value.flatMap(g => g.cards))
 <style scoped>
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
+  /* 固定列数：卡片均分铺满整行，不产生孤卡拉伸或右侧留白 */
+  grid-template-columns: repeat(5, 1fr);
+}
+@media (max-width: 799px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 460px) {
+  .stats-grid { grid-template-columns: 1fr; }
 }
 </style>

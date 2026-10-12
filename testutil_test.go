@@ -42,18 +42,19 @@ func newTestServer(t *testing.T, backendURL string) (*Server, db.Database, func(
 	}
 	svc := &Server{
 		cfg: config.Config{
-			ListenAddr:          ":0",
-			DataDir:             dataDir,
-			RetentionDays:       14,
-			MaxRequestBytes:     2 << 20,
-			MaxCaptureBytes:     2 << 20,
-			RequestTimeout:      15 * time.Second,
-			RecordPaths:         []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
+			ListenAddr:      ":0",
+			DataDir:         dataDir,
+			RetentionDays:   14,
+			MaxRequestBytes: 2 << 20,
+			MaxCaptureBytes: 2 << 20,
+			RequestTimeout:  15 * time.Second,
+			RecordPaths:     []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
 		},
 		store:    st,
 		balancer: balancer.New(backends, "wrr"),
 		client:   &http.Client{Timeout: 15 * time.Second},
 		hub:      events.New(),
+		inflight: make(map[string]*inflightInfo),
 	}
 	st.Active = func() int64 { return svc.active.Load() }
 

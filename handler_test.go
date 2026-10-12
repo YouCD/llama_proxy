@@ -46,8 +46,7 @@ func TestHandleModels(t *testing.T) {
 		{Name: "qwen", URL: "http://gpu-1:8080", Weight: 1, Model: "qwen3.8"},
 		{Name: "llm_proxyy", URL: "http://proxy:8080", Weight: 1},
 	}
-	cfg := config.Config{
-	}
+	cfg := config.Config{}
 	svc := &Server{
 		cfg:      cfg,
 		balancer: balancer.New(backends, "rr"),

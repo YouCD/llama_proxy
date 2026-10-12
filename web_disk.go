@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -20,9 +21,11 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 
 	if !s.uiHostAllowed(r) {
+		// 报错带上实际 Host 与配置提示：浏览器直接访问时能看到"该加哪个 Host 到白名单"。
 		httpx.WriteJSON(w, http.StatusForbidden, map[string]any{
 			"error":   "forbidden",
-			"message": "ui access not allowed for this host",
+			"host":    httpx.HostOnly(r.Host),
+			"message": fmt.Sprintf("ui access not allowed for host %q; add it to server.ui_allowed_hosts in config.yaml", httpx.HostOnly(r.Host)),
 		})
 		return
 	}

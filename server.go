@@ -28,9 +28,13 @@ type Server struct {
 	staticBackends []config.BackendConfig
 	// localNodeInPool 记录本地 background 节点是否已入池，避免无谓的池重建。
 	localNodeInPool bool
-	client          *http.Client
-	hub             *events.EventHub
-	active          atomic.Int64
+	// inflightMu/inflight 跟踪在途（已选中后端、尚未完成）请求，
+	// 供监控面板实时展示当前请求的客户端 IP / User-Agent（见 inflight.go）。
+	inflightMu sync.RWMutex
+	inflight   map[string]*inflightInfo
+	client     *http.Client
+	hub        *events.EventHub
+	active     atomic.Int64
 
 	sseMu       sync.Mutex
 	sseCancels  map[context.Context]context.CancelFunc

@@ -283,8 +283,7 @@ func TestSelectBackendWithBalancer(t *testing.T) {
 		{Name: "lb-2", URL: "http://lb2.example:8080", Weight: 1},
 	}
 
-	cfg := config.Config{
-	}
+	cfg := config.Config{}
 
 	svc := &Server{
 		cfg:      cfg,
@@ -348,7 +347,7 @@ func TestSelectBackendBalancerReturnsConfig(t *testing.T) {
 	// Use weighted random so each backend can be hit many times and we can
 	// verify config is attached to the right URL.
 	svc := &Server{
-		cfg: config.Config{},
+		cfg:      config.Config{},
 		balancer: balancer.New(backends, "random"),
 	}
 
@@ -415,13 +414,13 @@ func TestHandleProxyWithModelRewriteAndAPIKey(t *testing.T) {
 
 	svc := &Server{
 		cfg: config.Config{
-			ListenAddr:          ":0",
-			DataDir:             dataDir,
-			RetentionDays:       14,
-			MaxRequestBytes:     2 << 20,
-			MaxCaptureBytes:     2 << 20,
-			RequestTimeout:      15 * time.Second,
-			RecordPaths:         []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
+			ListenAddr:      ":0",
+			DataDir:         dataDir,
+			RetentionDays:   14,
+			MaxRequestBytes: 2 << 20,
+			MaxCaptureBytes: 2 << 20,
+			RequestTimeout:  15 * time.Second,
+			RecordPaths:     []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
 		},
 		store:    st,
 		balancer: balancer.New(backends, "wrr"),
@@ -480,13 +479,13 @@ func TestHandleProxyBackendKeyDoesNotOverrideClientKeyWhenEmpty(t *testing.T) {
 
 	svc := &Server{
 		cfg: config.Config{
-			ListenAddr:          ":0",
-			DataDir:             dataDir,
-			RetentionDays:       14,
-			MaxRequestBytes:     2 << 20,
-			MaxCaptureBytes:     2 << 20,
-			RequestTimeout:      15 * time.Second,
-			RecordPaths:         []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
+			ListenAddr:      ":0",
+			DataDir:         dataDir,
+			RetentionDays:   14,
+			MaxRequestBytes: 2 << 20,
+			MaxCaptureBytes: 2 << 20,
+			RequestTimeout:  15 * time.Second,
+			RecordPaths:     []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
 		},
 		store:    st,
 		balancer: balancer.New(backends, "wrr"),
@@ -539,13 +538,13 @@ func TestHandleProxyStripsVersionPrefixWhenBackendHasV1(t *testing.T) {
 
 	svc := &Server{
 		cfg: config.Config{
-			ListenAddr:          ":0",
-			DataDir:             dataDir,
-			RetentionDays:       14,
-			MaxRequestBytes:     2 << 20,
-			MaxCaptureBytes:     2 << 20,
-			RequestTimeout:      15 * time.Second,
-			RecordPaths:         []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
+			ListenAddr:      ":0",
+			DataDir:         dataDir,
+			RetentionDays:   14,
+			MaxRequestBytes: 2 << 20,
+			MaxCaptureBytes: 2 << 20,
+			RequestTimeout:  15 * time.Second,
+			RecordPaths:     []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"},
 		},
 		store:    st,
 		balancer: balancer.New(backends, "wrr"),

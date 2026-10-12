@@ -71,3 +71,18 @@ export async function fetchDailyStats(days, filters = {}) {
 export async function fetchScheduler() {
   return fetchJSON('/_proxy/scheduler')
 }
+
+// 手动触发调度器切换到指定模型（scheduling 中配置的模型 ID）。
+// 返回 {status:"switching"} 或 {status:"skipped"}（coding 租约活跃时跳过）。
+export async function switchSchedulerModel(model) {
+  return fetchJSON('/_proxy/scheduler/switch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model }),
+  })
+}
+
+export async function fetchInflight() {
+  const data = await fetchJSON('/_proxy/inflight')
+  return Array.isArray(data.items) ? data.items : []
+}

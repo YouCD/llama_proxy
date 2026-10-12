@@ -31,7 +31,7 @@
       <StatsCards :stats="stats" :llm-stats="llmStats" :has-filters="hasFilters" :output-sec="outputSec"
                   :window-label="timeWindow.label"/>
 
-      <SchedulerStatus :data="scheduler"/>
+      <SchedulerStatus :data="scheduler" :inflight="inflight"/>
 
       <BackendStats :items="backendStats" :window-sec="timeWindow.secs" @select="onBackendSelect"/>
 
@@ -46,6 +46,7 @@
 
       <FilterPanel ref="filterPanel" :models="models" :backends="backends" :quick-counts="quickCounts"
                    @apply="onApply"/>
+
 
       <RequestTable
           :items="items"
@@ -84,6 +85,7 @@ import {currentTheme, toggleTheme} from './theme'
 import {
   fetchBackends,
   fetchDailyStats,
+  fetchInflight,
   fetchModels,
   fetchRequest,
   fetchRequests,
@@ -109,6 +111,7 @@ const models = ref([])
 const backends = ref([])
 const dailyStats = ref([])
 const scheduler = ref(null)
+const inflight = ref([])
 const outputSec = ref(0)
 const hasMore = ref(false)
 const loadingMore = ref(false)
@@ -227,6 +230,14 @@ async function loadScheduler() {
   }
 }
 
+async function loadInflight() {
+  try {
+    inflight.value = await fetchInflight()
+  } catch {
+    /* ignore */
+  }
+}
+
 async function loadOptions() {
   try {
     models.value = await fetchModels()
@@ -239,7 +250,7 @@ async function loadOptions() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadStats(), loadRequests(), loadBackendStats(), loadDailyStats(), loadScheduler()])
+  await Promise.all([loadStats(), loadRequests(), loadBackendStats(), loadDailyStats(), loadScheduler(), loadInflight()])
 }
 
 function onApply(f) {
@@ -306,7 +317,11 @@ function onLangCommand(lang) {
 function connectEvents() {
   eventSource = new EventSource(`${API_PROXY}events`)
   eventSource.onopen = () => setLive('live', t('liveConnected'))
-  eventSource.onerror = () => setLive('retry', t('reconnecting'))
+  eventSource.onerror = () => {
+    setLive('retry', t('reconnecting'))
+    // 断线期间可能错过 inflight 事件，重连后拉取一次最新在途列表对账。
+    loadInflight().catch(() => { })
+  }
   // 监听不同事件类型，直接更新对应数据
   eventSource.addEventListener('stats', (e) => {
     const data = JSON.parse(e.data)
@@ -324,7 +339,18 @@ function connectEvents() {
     loadRequests().catch(() => {})
   })
   eventSource.addEventListener('scheduler', (e) => {
-    scheduler.value = JSON.parse(e.data)
+    const data = JSON.parse(e.data)
+    // kind 事件（如 manual_switch）只是通知，不是完整状态：覆盖会让面板消失，
+    // 改为重新拉取完整状态。
+    if (data.kind) {
+      loadScheduler().catch(() => {})
+      return
+    }
+    scheduler.value = data
+  })
+  eventSource.addEventListener('inflight', (e) => {
+    const data = JSON.parse(e.data)
+    inflight.value = Array.isArray(data.items) ? data.items : []
   })
 }
 

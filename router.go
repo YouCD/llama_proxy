@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"llama_proxy/internal/config"
 	"llama_proxy/internal/httpx"
 	"llama_proxy/internal/model"
 	"llama_proxy/internal/store"
@@ -42,10 +44,12 @@ func (s *Server) newRouter() *gin.Engine {
 	pg.Any("/stats-by-backend", s.apiStatsByBackend)
 	pg.Any("/daily-stats", s.apiDailyStats)
 	pg.Any("/requests", s.apiRequests)
+	pg.Any("/inflight", s.apiInflight)
 	pg.Any("/models", s.apiModels)
 	pg.Any("/backends", s.apiBackends)
 	pg.Any("/backend-metrics", s.apiBackendMetrics)
 	pg.Any("/scheduler", s.apiScheduler)
+	pg.Any("/scheduler/switch", s.apiSchedulerSwitch)
 	pg.Any("/request/:id", s.apiRequest)
 	// 通配保留旧版 "/raw/{id}/{request|response}" 的两段式校验（段数不对返回 400）。
 	pg.Any("/raw/*rest", s.apiRaw)
@@ -94,6 +98,7 @@ func (s *Server) apiRoot(c *gin.Context) {
 			"/_proxy/live",
 			"/_proxy/stats?hours=24",
 			"/_proxy/requests?limit=100&offset=0",
+			"/_proxy/inflight",
 			"/_proxy/request/{id}",
 			"/_proxy/raw/{id}/{request|response}",
 			"/_proxy/events",
@@ -101,6 +106,7 @@ func (s *Server) apiRoot(c *gin.Context) {
 			"/_proxy/daily-stats?days=30",
 			"/_proxy/ui",
 			"/_proxy/scheduler",
+			"/_proxy/scheduler/switch",
 		},
 	})
 }
@@ -209,6 +215,12 @@ func (s *Server) apiRequests(c *gin.Context) {
 	httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{"items": recs, "limit": limit, "offset": offset, "filters": f})
 }
 
+// apiInflight 返回当前正在处理（已选中后端、尚未完成）的请求列表，
+// 供面板实时展示当前请求的客户端 IP / User-Agent。
+func (s *Server) apiInflight(c *gin.Context) {
+	httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{"items": s.inflightList()})
+}
+
 func (s *Server) apiModels(c *gin.Context) {
 	items, err := s.store.GetModels()
 	if err != nil {
@@ -243,6 +255,62 @@ func (s *Server) apiScheduler(c *gin.Context) {
 		return
 	}
 	httpx.WriteJSON(c.Writer, http.StatusOK, s.schedulerStatus())
+}
+
+// apiSchedulerSwitch 处理 POST /_proxy/scheduler/switch：面板手动触发调度器切换到指定模型。
+// 校验通过后在后台执行切换（模型加载最长 startup_timeout，不能阻塞 HTTP 响应），
+// 立即返回 202；完成后广播调度事件，面板经 SSE 自动刷新状态。
+//
+//	body: {"model": "<scheduling 中配置的模型 ID>"}
+func (s *Server) apiSchedulerSwitch(c *gin.Context) {
+	if s.scheduler == nil {
+		httpx.WriteJSON(c.Writer, http.StatusNotFound, map[string]any{"error": "scheduler disabled"})
+		return
+	}
+	var req struct {
+		Model string `json:"model"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Model) == "" {
+		httpx.WriteJSON(c.Writer, http.StatusBadRequest, map[string]any{"error": `body must be {"model": "<model id>"}`})
+		return
+	}
+	modelID := strings.TrimSpace(req.Model)
+	sc := s.schedulingConfig()
+	entry := sc.Entry(modelID)
+	if sc == nil || entry == nil {
+		httpx.WriteJSON(c.Writer, http.StatusBadRequest,
+			map[string]any{"error": fmt.Sprintf("model %q is not configured in scheduling", modelID)})
+		return
+	}
+	// 目标为 background 且 coding 租约仍活跃：ensureModel 会保护正在使用的 coding
+	// 进程跳过切换（与流量驱动的 background 请求行为一致），此处提前给出明确提示。
+	if entry.Mode == config.ModeBackground && s.scheduler.IsCodingActive() {
+		httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{
+			"status":  "skipped",
+			"model":   modelID,
+			"message": "coding lease active, background switch skipped",
+		})
+		return
+	}
+	// coding 模式手动切换同样续期开发租约，与流量驱动切换行为一致。
+	if entry.Mode == config.ModeCoding {
+		s.scheduler.TouchCoding()
+	}
+	s.pushSchedEvent("manual_switch", map[string]any{"model": modelID})
+	// 用 Background ctx：切换是进程级动作，与本次 HTTP 请求生命周期解耦，
+	// 客户端断开（关浏览器）不中断模型加载。
+	go func() {
+		_, err := s.scheduler.EnsureModel(context.Background(), modelID)
+		if err != nil {
+			s.pushSchedEvent("manual_switch_failed", map[string]any{"model": modelID, "error": err.Error()})
+			return
+		}
+		if entry.Mode == config.ModeCoding {
+			s.scheduler.TouchCoding()
+		}
+		s.pushSchedEvent("manual_switch_ready", map[string]any{"model": modelID})
+	}()
+	httpx.WriteJSON(c.Writer, http.StatusAccepted, map[string]any{"status": "switching", "model": modelID})
 }
 
 // apiRequest 处理 GET（详情）/ DELETE（删除）/_proxy/request/{id}，方法分派与旧版一致。
@@ -431,6 +499,25 @@ func (s *Server) schedulerStatus() map[string]any {
 		} else {
 			status["lease_remaining_seconds"] = 0
 		}
+	}
+
+	// 面板可切换的模型列表：scheduling 配置的模型条目（ID + mode，按 ID 排序），
+	// active 标记当前已加载的模型，供切换下拉框展示与禁用当前项。
+	if _, yamlCfg := s.snapshot(); yamlCfg != nil && yamlCfg.Scheduling != nil {
+		ids := make([]string, 0, len(yamlCfg.Scheduling.Models))
+		for id := range yamlCfg.Scheduling.Models {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		models := make([]map[string]any, 0, len(ids))
+		for _, id := range ids {
+			models = append(models, map[string]any{
+				"id":     id,
+				"mode":   yamlCfg.Scheduling.Models[id].Mode,
+				"active": id == snap.Model,
+			})
+		}
+		status["models"] = models
 	}
 
 	s.schedMu.RLock()

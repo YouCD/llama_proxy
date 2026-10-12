@@ -99,6 +99,7 @@ func main() {
 		store:          st,
 		balancer:       backendBalancer,
 		staticBackends: yamlCfg.Backends.List,
+		inflight:       make(map[string]*inflightInfo),
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   cfg.RequestTimeout,

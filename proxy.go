@@ -80,7 +80,21 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	s.active.Add(1)
 	s.hub.BroadcastWithType("active", map[string]any{"active_connections": s.active.Load(), "time": time.Now().UTC()})
+	// 登记在途请求（供面板实时展示客户端 IP / User-Agent 等当前请求信息），
+	// 所有结束路径（成功/失败/客户端断开）统一经 defer 注销。
+	s.inflightAdd(&inflightInfo{
+		ID:         requestID,
+		ClientIP:   clientIP,
+		UserAgent:  r.UserAgent(),
+		Method:     r.Method,
+		Path:       r.URL.Path,
+		Model:      detectedModel,
+		BackendURL: firstCand.url,
+		Streaming:  isStreaming,
+		StartedAt:  time.Now().UTC(),
+	})
 	defer func() {
+		s.inflightRemove(requestID)
 		s.active.Add(-1)
 		s.hub.BroadcastWithType("active", map[string]any{"active_connections": s.active.Load(), "time": time.Now().UTC()})
 	}()
