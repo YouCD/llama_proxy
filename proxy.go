@@ -1,18 +1,14 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/textproto"
 	"strings"
 	"time"
 
-	"llama_proxy/internal/config"
 	"llama_proxy/internal/httpx"
 	"llama_proxy/internal/meta"
 	"llama_proxy/internal/model"
@@ -20,7 +16,6 @@ import (
 	"github.com/youcd/toolkit/log"
 )
 
-// handleProxy 是代理转发入口：选择后端、转发请求、流式回传并记录指标。
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// 请求开始时取一份配置快照，处理期间配置热更新不影响本请求的判定。
 	cfg, _ := s.snapshot()
@@ -334,79 +329,7 @@ type routeRule struct {
 
 // effectiveRoutingRules 返回生效的路由规则（来自 routing.rules 配置）；
 // 未配置 routing 时返回空切片（无规则，全部流量走默认池）。
-func (s *Server) effectiveRoutingRules() []routeRule {
-	_, yamlCfg := s.snapshot()
-	if yamlCfg == nil || yamlCfg.Routing == nil || len(yamlCfg.Routing.Rules) == 0 {
-		return nil
-	}
-	rules := make([]routeRule, 0, len(yamlCfg.Routing.Rules))
-	for i := range yamlCfg.Routing.Rules {
-		rr := &yamlCfg.Routing.Rules[i]
-		name := strings.TrimSpace(rr.Name)
-		if name == "" {
-			name = fmt.Sprintf("rule-%d", i+1)
-		}
-		rules = append(rules, routeRule{
-			name:   name,
-			header: rr.Header,
-			pool:   strings.TrimSpace(rr.Pool),
-		})
-	}
-	return rules
-}
 
-// matchRoutingRule 按配置顺序返回首条命中的路由规则；无规则或未命中时返回 nil。
-func (s *Server) matchRoutingRule(r *http.Request) *routeRule {
-	rules := s.effectiveRoutingRules()
-	for i := range rules {
-		if ruleMatches(r, rules[i].header) {
-			return &rules[i]
-		}
-	}
-	return nil
-}
-
-// ruleMatches 判定请求是否命中规则的 header 条件：map 内所有请求头必须同时满足
-// （AND）。头名按规范化后的形式比较（Go 服务端把收到的头名规范化为标准形式，例如
-// X-LLM-Purpose 会存为 X-Llm-Purpose，客户端原始大小写不可观测，因此配置头名写
-// user-agent 或 X-Agent-Env 都等价于标准形式）；头值匹配规则：User-Agent 采用
-// 包含匹配（不区分大小写的子串包含），其余请求头 trim 后精确相等、区分大小写；
-// 头缺失或为空视为不满足。
-func ruleMatches(r *http.Request, h map[string]string) bool {
-	if len(h) == 0 {
-		return false
-	}
-	for name, want := range h {
-		key := textproto.CanonicalMIMEHeaderKey(name)
-		vals, ok := r.Header[key]
-		if !ok {
-			return false
-		}
-		v := strings.TrimSpace(vals[0])
-		if v == "" {
-			return false
-		}
-		if key == "User-Agent" {
-			// User-Agent 采用包含匹配（不区分大小写）：完整 UA 串很长且常带版本/平台后缀，
-			// 精确相等难以维护；配置 "GoClaw" 即可命中 "GoClaw/2.1 (Windows)"。
-			if !strings.Contains(strings.ToLower(v), strings.ToLower(want)) {
-				return false
-			}
-			continue
-		}
-		if v != want {
-			return false
-		}
-	}
-	return true
-}
-
-// ProxyModelID 是代理对外暴露的占位模型 ID：客户端请求该 ID（或省略 model 字段）时
-// 按策略轮询模型列表（backends.list + 本地 background 节点）；请求具体模型 ID 时
-// 直连部署该模型的后端/本地进程。
-const ProxyModelID = "llm_proxy"
-
-// statusError 携带期望的 HTTP 状态码（selectBackend 的默认错误按 400 返回）。
 type statusError struct {
 	code int
 	msg  string
@@ -429,169 +352,7 @@ func statusErrf(code int, format string, args ...any) error {
 //   - 模型 ID 为具体名称：直连部署该模型的后端（backends.list）或本地调度进程
 //     （scheduling 模型条目，未就绪则启动并等待，coding 模式续期租约），
 //     单后端、不可故障转移；未找到部署该模型的后端/进程时返回 400。
-func (s *Server) selectBackend(w http.ResponseWriter, r *http.Request, ctx context.Context, reqModel string) (*backendCandidate, string, func(map[string]bool) *backendCandidate, error) {
-	// 具体模型 ID：直连对应后端/本地进程（不使用 routing 规则）。
-	if reqModel != "" && reqModel != ProxyModelID {
-		cand, err := s.selectSpecificBackend(r, ctx, reqModel)
-		if err != nil {
-			return nil, r.URL.RawQuery, nil, err
-		}
-		return cand, r.URL.RawQuery, noFailover, nil
-	}
 
-	var first *backendCandidate
-	var nextFn func(map[string]bool) *backendCandidate
-
-	if rule := s.matchRoutingRule(r); rule != nil {
-		// 命中路由规则：只从 pool 标签子池选点（含本地 background 节点）。
-		// 请求失败时自动转移到子池内下一个未尝试的后端。
-		if s.balancer != nil {
-			if b := s.balancer.SelectFromTag(rule.pool); b != nil {
-				first = candidateOf(b)
-				pool := rule.pool
-				nextFn = func(exclude map[string]bool) *backendCandidate {
-					if b := s.balancer.SelectFromTagExcluding(pool, exclude); b != nil {
-						return candidateOf(b)
-					}
-					return nil
-				}
-			}
-		}
-		if first == nil {
-			return nil, "", nil, fmt.Errorf("routing rule %q matched but pool %q has no available backend", rule.name, rule.pool)
-		}
-	} else if s.balancer != nil {
-		if b := s.balancer.Select(); b != nil {
-			first = candidateOf(b)
-			nextFn = s.nextBalancerCandidate
-		}
-	}
-
-	if first == nil {
-		return nil, "", nil, fmt.Errorf("no backend selected: configure backends.list")
-	}
-
-	if err := config.ValidateBackendURL(first.url); err != nil {
-		return nil, "", nil, fmt.Errorf("invalid backend URL: %w", err)
-	}
-	if nextFn == nil {
-		nextFn = noFailover
-	}
-	return first, r.URL.RawQuery, nextFn, nil
-}
-
-// selectSpecificBackend 按具体模型 ID 直连部署该模型的目标：
-//  1. 本地调度进程（scheduling 模型条目，请求该模型 ID 时启动/切换并等待就绪，
-//     coding 模式同时续期开发租约；background 条目在 coding 租约仍活跃时进程被
-//     占用，返回 503）；
-//  2. 代理池内声明该模型的后端（backends.list 与就绪的本地节点，
-//     经 GetBackendByModel 反查，模型 ID 唯一性由启动时校验保证）。
-func (s *Server) selectSpecificBackend(r *http.Request, ctx context.Context, reqModel string) (*backendCandidate, error) {
-	sc := s.schedulingConfig()
-	if sc != nil && s.scheduler != nil {
-		if entry := sc.Entry(reqModel); entry != nil {
-			return s.selectScheduledModel(ctx, reqModel, entry)
-		}
-	}
-	if s.balancer != nil {
-		if b := s.balancer.GetBackendByModel(reqModel); b != nil {
-			return candidateOf(b), nil
-		}
-	}
-	return nil, fmt.Errorf("unknown model %q: use %q for load-balanced routing or one of the configured model ids", reqModel, ProxyModelID)
-}
-
-// selectScheduledModel 把请求路由到指定模型的本地调度进程：未就绪则触发切换并等待；
-// coding 模式流量续期开发租约并广播事件；background 模式请求在 coding 租约仍活跃时
-// 被拒（503），保护正在使用的 coding 进程。
-func (s *Server) selectScheduledModel(ctx context.Context, modelID string, entry *config.ProcessConfig) (*backendCandidate, error) {
-	if entry.Mode == config.ModeCoding {
-		s.scheduler.TouchCoding()
-		s.pushSchedEvent("coding_request", map[string]any{"model": modelID})
-	}
-	if entry.Mode == config.ModeBackground && s.scheduler.IsCodingActive() {
-		return nil, statusErrf(http.StatusServiceUnavailable,
-			"model %q not ready: coding model is active (lease), retry later", modelID)
-	}
-	ready, rerr := s.scheduler.EnsureModel(ctx, modelID)
-	if rerr != nil {
-		return nil, rerr
-	}
-	select {
-	case <-ready:
-	case <-ctx.Done():
-		return nil, fmt.Errorf("timed out waiting for model %s ready", modelID)
-	}
-	base := s.scheduler.ActiveBaseURL()
-	if base == "" {
-		return nil, fmt.Errorf("model %s not ready", modelID)
-	}
-	if entry.Mode == config.ModeCoding {
-		s.scheduler.TouchCoding()
-	}
-	return &backendCandidate{url: strings.TrimRight(base, "/"), cfg: s.schedulerForwardBC()}, nil
-}
-
-// schedulingConfig 返回调度配置（未启用调度时为 nil）。
-func (s *Server) schedulingConfig() *config.SchedulingConfig {
-	_, yamlCfg := s.snapshot()
-	if yamlCfg == nil || yamlCfg.Scheduling == nil {
-		return nil
-	}
-	return yamlCfg.Scheduling
-}
-
-// backendCandidate 是单个转发目标（后端地址及其配置；动态指定后端时 cfg 为 nil）。
-type backendCandidate struct {
-	url string
-	cfg *config.BackendConfig
-}
-
-// backendAttempt 记录单个后端的请求结果，用于所有后端失败时把完整的故障转移过程
-// 按后端分组返回给客户端。
-type backendAttempt struct {
-	Name       string `json:"name,omitempty"`
-	URL        string `json:"url"`
-	StatusCode int    `json:"status_code,omitempty"`
-	Body       string `json:"body,omitempty"`
-	Truncated  bool   `json:"truncated,omitempty"`
-	Error      string `json:"error,omitempty"`
-}
-
-// noFailover 表示没有故障转移目标（单后端或动态指定的后端）。
-var noFailover = func(map[string]bool) *backendCandidate { return nil }
-
-// candidateKey 返回故障转移时标记“已尝试”的键：池内后端用后端名（与 balancer 的
-// SelectExcluding 按名排除一致），动态指定的后端用地址（其不参与故障转移）。
-func candidateKey(c *backendCandidate) string {
-	if c.cfg != nil {
-		return c.cfg.Name
-	}
-	return c.url
-}
-
-// candidateName 返回后端名；动态指定的后端没有名字，返回空串。
-func candidateName(c *backendCandidate) string {
-	if c.cfg != nil {
-		return c.cfg.Name
-	}
-	return ""
-}
-
-// maxFailReportBytes 是“所有后端失败”报告中每个后端响应体捕获的字节上限。
-const maxFailReportBytes = 8 * 1024
-
-// readLimited 从 body 读取至多 cap 字节并返回截断标志（不关闭 body）。
-func readLimited(body io.Reader, cap int) ([]byte, bool) {
-	raw, _ := io.ReadAll(io.LimitReader(body, int64(cap)+1))
-	truncated := len(raw) > cap
-	if truncated {
-		raw = raw[:cap]
-	}
-	return raw, truncated
-}
-
-// recordRequest 保存请求原文并插入一条请求记录，指向实际转发（或最后尝试）的后端。
 func (s *Server) recordRequest(ctx context.Context, requestID string, started time.Time, r *http.Request, clientIP, trimmedQuery string, isStreaming bool, cand *backendCandidate, reqModel string, body []byte) {
 	reqRawPath, err := s.store.SaveRawPayload(requestID, "request", body)
 	if err != nil {
@@ -616,99 +377,3 @@ func (s *Server) recordRequest(ctx context.Context, requestID string, started ti
 }
 
 // candidateOf 把后端配置转换为转发候选。
-func candidateOf(b *config.BackendConfig) *backendCandidate {
-	return &backendCandidate{url: strings.TrimRight(b.URL, "/"), cfg: b}
-}
-
-// nextBalancerCandidate 从全量池返回下一个未尝试过的后端（请求失败后的自动故障转移）。
-func (s *Server) nextBalancerCandidate(exclude map[string]bool) *backendCandidate {
-	if s.balancer == nil {
-		return nil
-	}
-	if b := s.balancer.SelectExcluding(exclude); b != nil {
-		return candidateOf(b)
-	}
-	return nil
-}
-
-// isStreamingResponse 判定响应是否按流式回传（请求声明 stream 或响应为 SSE）。
-func isStreamingResponse(resp *http.Response, reqStreaming bool) bool {
-	if reqStreaming {
-		return true
-	}
-	ct := strings.ToLower(resp.Header.Get("Content-Type"))
-	return strings.Contains(ct, "text/event-stream")
-}
-
-// streamCopy 普通响应的流式转发：边读边写、边刷盘，同时限量采样到 capture。
-func streamCopy(w http.ResponseWriter, src io.Reader, capture *meta.LimitedBuffer, started time.Time) (copied int64, firstByteMs float64, err error) {
-	flusher, _ := w.(http.Flusher)
-	buf := make([]byte, 32*1024)
-	seenFirst := false
-	for {
-		n, rerr := src.Read(buf)
-		if n > 0 {
-			if !seenFirst {
-				seenFirst = true
-				firstByteMs = float64(time.Since(started).Milliseconds())
-			}
-			chunk := buf[:n]
-			wn, werr := w.Write(chunk)
-			if wn > 0 {
-				copied += int64(wn)
-				_, _ = capture.Write(chunk[:wn])
-				if flusher != nil {
-					flusher.Flush()
-				}
-			}
-			if werr != nil {
-				return copied, firstByteMs, werr
-			}
-		}
-		if rerr != nil {
-			if errors.Is(rerr, io.EOF) {
-				return copied, firstByteMs, nil
-			}
-			return copied, firstByteMs, rerr
-		}
-	}
-}
-
-// streamCopySSE 流式响应的逐行转发：额外统计 SSE data 块数量（排除 [DONE]）。
-func streamCopySSE(w http.ResponseWriter, src io.Reader, capture *meta.LimitedBuffer, started time.Time) (copied int64, firstByteMs float64, chunks int64, err error) {
-	flusher, _ := w.(http.Flusher)
-	reader := bufio.NewReader(src)
-	seenFirst := false
-	for {
-		line, rerr := reader.ReadBytes('\n')
-		if len(line) > 0 {
-			if !seenFirst {
-				seenFirst = true
-				firstByteMs = float64(time.Since(started).Milliseconds())
-			}
-			if bytes.HasPrefix(line, []byte("data:")) {
-				trimmed := strings.TrimSpace(strings.TrimPrefix(string(line), "data:"))
-				if trimmed != "" && trimmed != "[DONE]" {
-					chunks++
-				}
-			}
-			wn, werr := w.Write(line)
-			if wn > 0 {
-				copied += int64(wn)
-				_, _ = capture.Write(line[:wn])
-				if flusher != nil {
-					flusher.Flush()
-				}
-			}
-			if werr != nil {
-				return copied, firstByteMs, chunks, werr
-			}
-		}
-		if rerr != nil {
-			if errors.Is(rerr, io.EOF) {
-				return copied, firstByteMs, chunks, nil
-			}
-			return copied, firstByteMs, chunks, rerr
-		}
-	}
-}

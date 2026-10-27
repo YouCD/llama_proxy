@@ -86,7 +86,7 @@ func newPoolTestServer(t *testing.T, cfg *config.SchedulingConfig, staticBackend
 		client:         &http.Client{Timeout: 15 * time.Second},
 		hub:            events.New(),
 	}
-	svc.syncLocalBackendNode()
+	svc.syncLocalBackendNodes()
 	return svc
 }
 
@@ -120,8 +120,8 @@ func TestHandleProxySchedulerPool(t *testing.T) {
 
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"qwen3.8": {Mode: config.ModeCoding, ReadinessURL: local.URL, APIKey: "coding-key"},
-			"qwen3.6": {Mode: config.ModeBackground, ReadinessURL: local.URL, APIKey: "bg-key", Weight: 2},
+			"qwen3.8": {Mode: config.ModeCoding, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "coding-key"},
+			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "bg-key", Weight: 2},
 		},
 	}
 	staticBackends := []config.BackendConfig{
@@ -170,8 +170,8 @@ func TestHandleProxySchedulerCodingPool(t *testing.T) {
 
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"qwen3.8": {Mode: config.ModeCoding, ReadinessURL: local.URL, APIKey: "coding-key"},
-			"qwen3.6": {Mode: config.ModeBackground, ReadinessURL: local.URL, APIKey: "bg-key"},
+			"qwen3.8": {Mode: config.ModeCoding, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "coding-key"},
+			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "bg-key"},
 		},
 	}
 	staticBackends := []config.BackendConfig{
@@ -192,7 +192,7 @@ func TestHandleProxySchedulerCodingPool(t *testing.T) {
 	}
 
 	// 进入 coding 模式后同步池：本地节点出池。
-	svc.syncLocalBackendNode()
+	svc.syncLocalBackendNodes()
 	if got := svc.balancer.Len(); got != 1 {
 		t.Fatalf("pool during coding = %d nodes, want 1 (static only)", got)
 	}
@@ -237,8 +237,8 @@ func TestHandleProxySchedulerKeyIsolation(t *testing.T) {
 
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"qwen3.8": {Mode: config.ModeCoding, ReadinessURL: backend.URL, APIKey: "coding-key"},
-			"qwen3.6": {Mode: config.ModeBackground, ReadinessURL: backend.URL, APIKey: "bg-key"},
+			"qwen3.8": {Mode: config.ModeCoding, Command: "sleep 3600", ReadinessURL: backend.URL, APIKey: "coding-key"},
+			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: backend.URL, APIKey: "bg-key"},
 		},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: time.Second}
@@ -281,7 +281,7 @@ func TestHandleProxySchedulerKeyIsolation(t *testing.T) {
 		client:         &http.Client{Timeout: 15 * time.Second},
 		hub:            events.New(),
 	}
-	svc.syncLocalBackendNode()
+	svc.syncLocalBackendNodes()
 	proxy := httptest.NewServer(svc)
 	defer proxy.Close()
 
@@ -325,8 +325,8 @@ func TestHandleProxySchedulerGoClawBackground(t *testing.T) {
 
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"qwen3.8": {Mode: config.ModeCoding, ReadinessURL: local.URL, APIKey: "coding-key"},
-			"qwen3.6": {Mode: config.ModeBackground, ReadinessURL: local.URL, APIKey: "bg-key", Weight: 1, Tags: []string{"tool_call"}},
+			"qwen3.8": {Mode: config.ModeCoding, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "coding-key"},
+			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "bg-key", Weight: 1, Tags: []string{"tool_call"}},
 		},
 	}
 	staticBackends := []config.BackendConfig{
@@ -340,7 +340,7 @@ func TestHandleProxySchedulerGoClawBackground(t *testing.T) {
 	}}}
 
 	// 本地节点入池后应携带 tool_call 标签。
-	if b := svc.balancer.GetBackendByName(localBackgroundBackendName); b == nil || !b.EffectiveTags()["tool_call"] {
+	if b := svc.balancer.GetBackendByName(localNodeNamePrefix + "qwen3.6"); b == nil || !b.EffectiveTags()["tool_call"] {
 		t.Fatalf("local node in pool = %+v, want tool_call tag", b)
 	}
 

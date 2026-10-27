@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -117,9 +118,8 @@ func main() {
 	}
 
 	if s.scheduler != nil {
-		defaultBG, _ := yamlCfg.Scheduling.DefaultBackground()
-		log.WithCtx(ctx).Infof("process scheduler enabled: models=%d default_background=%q coding_idle_timeout=%s drain=%s kill=%s startup=%s",
-			len(yamlCfg.Scheduling.Models), defaultBG, yamlCfg.Scheduling.Lease.CodingIdleTimeout, yamlCfg.Scheduling.Switch.DrainTimeout, yamlCfg.Scheduling.Switch.KillTimeout, yamlCfg.Scheduling.Switch.StartupTimeout)
+		log.WithCtx(ctx).Infof("process scheduler enabled: models=%d default_background_group=%s coding_idle_timeout=%s drain=%s kill=%s startup=%s",
+			len(yamlCfg.Scheduling.Models), strings.Join(yamlCfg.Scheduling.DefaultBackgroundGroup(), ","), yamlCfg.Scheduling.Lease.CodingIdleTimeout, yamlCfg.Scheduling.Switch.DrainTimeout, yamlCfg.Scheduling.Switch.KillTimeout, yamlCfg.Scheduling.Switch.StartupTimeout)
 	}
 	go st.CleanupLoop(ctx)
 	// 配置文件动态加载：变更时热更新可动态项，不可热更新项保留旧值并提示重启。
@@ -134,7 +134,7 @@ func main() {
 			}
 		}()
 		go s.scheduler.Loop(ctx)
-		go s.syncLocalBackendNodeLoop(ctx)
+		go s.syncLocalBackendNodesLoop(ctx)
 	}
 
 	// 定时广播完整统计快照给 SSE 订阅者，取代前端轮询。

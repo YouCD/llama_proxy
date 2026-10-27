@@ -19,12 +19,12 @@ func newSwitchTestServer(t *testing.T) *Server {
 		Models: map[string]config.ProcessConfig{
 			"bg-model": {
 				Mode:         config.ModeBackground,
-				Command:      "",
+				Command:      "sleep 3600",
 				ReadinessURL: "http://127.0.0.1:1/v1/models",
 			},
 			"coding-m": {
 				Mode:         config.ModeCoding,
-				Command:      "",
+				Command:      "sleep 3600",
 				ReadinessURL: "http://127.0.0.1:2/v1/models",
 			},
 		},
@@ -112,14 +112,20 @@ func TestSchedulerSwitchToCoding(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		snap := svc.scheduler.Snapshot()
-		if snap.Model == "coding-m" {
-			if !snap.Ready {
+		ready := false
+		for _, m := range snap.Models {
+			if m.ID == "coding-m" {
+				ready = m.Ready
+			}
+		}
+		if snap.CodingModel == "coding-m" {
+			if !ready {
 				t.Fatalf("coding-m switched but not ready")
 			}
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for coding-m, model=%q", snap.Model)
+			t.Fatalf("timed out waiting for coding-m, coding_model=%q", snap.CodingModel)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

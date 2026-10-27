@@ -28,28 +28,26 @@
             <span class="sched-mode">{{ modeLabel }}</span>
             <span class="sched-badge" :class="stateDot">{{ badgeLabel }}</span>
           </div>
-          <div class="sched-sub">
-            <span class="mono">{{ t('schedModelLabel') }}: {{ data.model || '-' }}</span>
-          </div>
         </div>
       </div>
 
       <div class="vsep"></div>
 
-      <div class="sched-stat">
-        <div class="stat-txt">
-          <div class="stat-label">PID</div>
-          <div class="stat-val mono">{{ data.pid || '-' }}</div>
+      <!-- 模型成员 chips：background 组态下列出常驻组成员，coding 态下列出当前 coding 模型 -->
+      <div class="sched-models">
+        <div
+          v-for="m in data.models"
+          :key="m.id"
+          class="model-chip"
+          :class="'mc-' + mcState(m)"
+          :title="mcTitle(m)"
+        >
+          <span class="mc-dot"></span>
+          <span class="mono mc-id">{{ m.id }}</span>
+          <span v-if="m.pid" class="mono mc-pid">{{ m.pid }}</span>
+          <span v-if="m.active" class="mc-cur">{{ t('schedCurrent') }}</span>
         </div>
-      </div>
-
-      <div class="vsep"></div>
-
-      <div class="sched-stat">
-        <div class="stat-txt">
-          <div class="stat-label">{{ t('schedAddr') }}</div>
-          <div class="stat-val mono url">{{ data.active_base_url || '-' }}</div>
-        </div>
+        <span v-if="!data.models || !data.models.length" class="cell-subtle">-</span>
       </div>
 
       <div class="sched-right">
@@ -172,6 +170,19 @@ const modeLabel = computed(() => {
   return '-'
 })
 
+function mcState(m) {
+  if (m.error) return 'err'
+  if (m.ready) return 'ok'
+  return m.running ? 'loading' : 'stopped'
+}
+
+function mcTitle(m) {
+  if (m.error) return t('schedError')
+  if (m.ready) return t('schedReady')
+  if (m.running) return t('schedLoading')
+  return t('schedStopped')
+}
+
 const stateDot = computed(() => {
   if (props.data?.error) return 'err'
   if (props.data?.ready) return 'ok'
@@ -269,16 +280,6 @@ const badgeLabel = computed(() => {
   border-color: rgba(220, 80, 80, 0.5);
   background: rgba(220, 80, 80, 0.1);
 }
-.sched-sub {
-  margin-top: 4px;
-  font-size: 12px;
-  color: var(--color-dim);
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.dot-sep { color: var(--color-faint); }
-
 .vsep {
   width: 1px;
   align-self: stretch;
@@ -286,25 +287,65 @@ const badgeLabel = computed(() => {
   flex: none;
 }
 
-.sched-stat {
+/* —— 模型成员 chips —— */
+.sched-models {
   display: flex;
   align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
-.stat-label {
-  font-size: 11px;
-  color: var(--color-faint);
-  letter-spacing: 0.4px;
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border: 1px solid var(--color-rule);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.015);
 }
-.stat-val {
-  font-size: 14px;
-  font-weight: 700;
+.mc-id {
+  font-size: 12.5px;
+  font-weight: 600;
   color: var(--color-text);
-  margin-top: 2px;
 }
-.stat-val.url {
-  color: #5ba3e0;
-  font-weight: 500;
-  font-size: 13px;
+.mc-pid {
+  font-size: 11px;
+  color: var(--color-dim);
+}
+.mc-cur {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #4ade80;
+  background: rgba(34, 197, 94, 0.12);
+  padding: 1px 7px;
+  border-radius: 8px;
+}
+.mc-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--color-faint);
+}
+.model-chip.mc-ok .mc-dot {
+  background: #22c55e;
+  box-shadow: 0 0 7px rgba(34, 197, 94, 0.7);
+}
+.model-chip.mc-loading {
+  border-color: rgba(245, 158, 11, 0.55);
+}
+.model-chip.mc-loading .mc-dot {
+  background: var(--color-amber);
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
+}
+.model-chip.mc-loading .mc-id {
+  color: var(--color-amber);
+}
+.model-chip.mc-err {
+  border-color: rgba(220, 80, 80, 0.5);
+}
+.model-chip.mc-err .mc-dot {
+  background: var(--color-crimson);
 }
 
 .sched-right {

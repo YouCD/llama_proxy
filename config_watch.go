@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"llama_proxy/internal/balancer"
@@ -91,10 +92,10 @@ func (s *Server) reloadConfigFrom(ctx context.Context, path string) {
 }
 
 // schedulingLaunch 提取与进程启动相关的调度字段，用于热更新差异检测：
-// 模型条目（ID/mode/command/readiness_url）与 default 任何变化都需重启；
+// 模型条目（ID/mode/command/readiness_url）与 default 组任何变化都需重启；
 // lease/switch 时序可热更新（SetTimings）。
 type schedulingLaunch struct {
-	Default string
+	Default string // default 组成员按字典序逗号连接
 	Entries []string // 排序后的 "modelID|mode|command|readiness_url"
 }
 
@@ -102,7 +103,9 @@ func processLaunch(sc *config.SchedulingConfig) schedulingLaunch {
 	if sc == nil {
 		return schedulingLaunch{}
 	}
-	out := schedulingLaunch{Default: sc.Default}
+	group := sc.DefaultBackgroundGroup()
+	sort.Strings(group)
+	out := schedulingLaunch{Default: strings.Join(group, ",")}
 	for id, e := range sc.Models {
 		out.Entries = append(out.Entries, fmt.Sprintf("%s|%s|%s|%s", id, e.Mode, e.Command, e.ReadinessURL))
 	}

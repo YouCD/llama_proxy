@@ -26,8 +26,12 @@ type Server struct {
 	balancer       *balancer.Balancer
 	scheduler      *scheduler.Scheduler
 	staticBackends []config.BackendConfig
-	// localNodeInPool 记录本地 background 节点是否已入池，避免无谓的池重建。
-	localNodeInPool bool
+	// localNodeSig 记录已入池的本地 background 成员 ID 签名（逗号连接），
+	// 签名不变则跳过池重建。
+	localNodeSig string
+	// schedStateSig 记录上次广播的调度器状态签名，变化时广播 scheduler_state
+	// 事件让前端刷新面板（前端无轮询，状态更新全靠此推送）。
+	schedStateSig string
 	// inflightMu/inflight 跟踪在途（已选中后端、尚未完成）请求，
 	// 供监控面板实时展示当前请求的客户端 IP / User-Agent（见 inflight.go）。
 	inflightMu sync.RWMutex

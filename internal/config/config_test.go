@@ -195,9 +195,9 @@ scheduling:
 	if bg == nil || bg.Mode != ModeBackground || bg.ReadinessURL != "http://127.0.0.1:8080" || bg.Weight != 3 || !bg.EffectiveTags()["tool_call"] {
 		t.Fatalf("background entry=%+v", bg)
 	}
-	id, def := cfg.Scheduling.DefaultBackground()
-	if id != "qwen3.6" || def == nil {
-		t.Fatalf("default background=(%q, %+v), want qwen3.6", id, def)
+	group := cfg.Scheduling.DefaultBackgroundGroup()
+	if len(group) != 1 || group[0] != "qwen3.6" {
+		t.Fatalf("default background group=%v, want [qwen3.6]", group)
 	}
 	if cfg.Scheduling.Lease.CodingIdleTimeout != 45*time.Minute {
 		t.Fatalf("idle timeout=%v", cfg.Scheduling.Lease.CodingIdleTimeout)
@@ -367,7 +367,9 @@ scheduling:
 		t.Fatalf("expected missing-default error, got %v", err)
 	}
 
-	// 多个 background 指定 default：合法，且多个 coding 也合法
+	// 多个 background 全部列入 default 组：合法，且多个 coding 也合法。
+	// background 成员并行常驻必须各自不同端口；coding 互斥运行，可共用同一端口，
+	// 也可与 background 成员共用端口（coding 运行期间 background 组已停止）。
 	content := `
 scheduling:
   bg-a:
@@ -377,7 +379,7 @@ scheduling:
   bg-b:
     mode: background
     command: "llama-server"
-    readiness_url: "http://127.0.0.1:8080"
+    readiness_url: "http://127.0.0.1:8081"
   code-a:
     mode: coding
     command: "llama-server"
@@ -386,10 +388,48 @@ scheduling:
     mode: coding
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8080"
-  default: "bg-b"
+  default: ["bg-a", "bg-b"]
 `
 	if err := writeAndLoad(content); err != nil {
 		t.Fatalf("multi coding/background with default should load, got %v", err)
+	}
+
+	// coding 条目与 backends.list 同 origin：报错（coding 运行时后端仍在服务）
+	err = writeAndLoad(`
+backends:
+  list:
+    - name: "local"
+      url: "http://127.0.0.1:8080/v1"
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8081"
+  code-a:
+    mode: coding
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080/v1/models"
+  default: ["bg-a"]
+`)
+	if err == nil || !strings.Contains(err.Error(), "端口冲突") {
+		t.Fatalf("expected coding/backend port collision, got %v", err)
+	}
+
+	// background 未全部列入 default 组：报错（不在组内的 background 永远不会加载）
+	err = writeAndLoad(`
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+  bg-b:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8081"
+  default: ["bg-a"]
+`)
+	if err == nil || !strings.Contains(err.Error(), "default") {
+		t.Fatalf("expected background-outside-group error, got %v", err)
 	}
 
 	// default 指向 coding 条目
