@@ -51,8 +51,9 @@ func TestLocalNodes(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	nodes := s.LocalNodes()
-	if len(nodes) != 1 || nodes[0].BaseURL != "http://127.0.0.1:8080/v1" || nodes[0].ModelID != "bg-model" {
-		t.Fatalf("LocalNodes after start = %+v, want bg-model on http://127.0.0.1:8080/v1", nodes)
+	wantBase := apiBaseFromReadiness(s.cfg.Entry("bg-model").ReadinessURL)
+	if len(nodes) != 1 || nodes[0].BaseURL != wantBase || nodes[0].ModelID != "bg-model" {
+		t.Fatalf("LocalNodes after start = %+v, want bg-model on %s", nodes, wantBase)
 	}
 
 	// 切到 coding 后，本地节点出池。
@@ -72,7 +73,7 @@ func TestProcessLogFileCaptured(t *testing.T) {
 			"log-model": {
 				Mode:         config.ModeBackground,
 				Command:      "printf 'hello-stdout\\n' && printf 'hello-stderr\\n' >&2",
-				ReadinessURL: "http://127.0.0.1:8080",
+				ReadinessURL: readinessURLFor(freePort(t)),
 				LogFile:      logPath,
 			},
 		},
@@ -116,7 +117,7 @@ func TestOpenProcessLogEmpty(t *testing.T) {
 func TestReconcileReadyAfterStartupTimeout(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"coding-model": {Mode: config.ModeCoding, Command: "sleep 30", ReadinessURL: "http://127.0.0.1:8080/v1/models"},
+			"coding-model": {Mode: config.ModeCoding, Command: "sleep 30", ReadinessURL: readinessURLFor(freePort(t))},
 		},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 300 * time.Millisecond}
@@ -148,7 +149,7 @@ func TestReconcileReadyAfterStartupTimeout(t *testing.T) {
 	if !readyNow {
 		t.Fatal("expected ready after reconcile")
 	}
-	if got := s.BaseURLFor("coding-model"); got != "http://127.0.0.1:8080/v1" {
+	if got := s.BaseURLFor("coding-model"); got != apiBaseFromReadiness(cfg.Entry("coding-model").ReadinessURL) {
 		t.Fatalf("unexpected BaseURLFor: %q", got)
 	}
 	select {
@@ -207,7 +208,7 @@ func TestAPIBaseFromReadiness(t *testing.T) {
 func TestMarkSlotReadyConcurrent(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"coding-model": {Mode: config.ModeCoding, Command: "sleep 30", ReadinessURL: "http://127.0.0.1:8080/v1/models"},
+			"coding-model": {Mode: config.ModeCoding, Command: "sleep 30", ReadinessURL: readinessURLFor(freePort(t))},
 		},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: time.Second}

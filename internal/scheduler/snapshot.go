@@ -52,9 +52,12 @@ func (s *Scheduler) Snapshot() Snapshot {
 		e := s.cfg.Entry(id)
 		st := ModelStatus{ID: id, Mode: e.Mode, InGroup: inGroup[id]}
 		if sl := s.procs[id]; sl != nil {
-			st.Running = sl.cmd != nil
+			st.Running = sl.running()
 			st.Ready = sl.readyOK
-			if sl.cmd != nil && sl.cmd.Process != nil {
+			// 优先展示真实服务进程 PID（端口持有者）；未知时回退包装进程 PID。
+			if sl.serverPID != 0 {
+				st.PID = sl.serverPID
+			} else if sl.cmd != nil && sl.cmd.Process != nil {
 				st.PID = sl.cmd.Process.Pid
 			}
 		}

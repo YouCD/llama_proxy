@@ -98,15 +98,16 @@ func TestCodingActiveStateAfterSwitch(t *testing.T) {
 // channel，且不影响当前状态。
 
 func TestCodingPreemptsBackgroundStartup(t *testing.T) {
+	codingURL := readinessURLFor(freePort(t))
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"coding-model": {Mode: config.ModeCoding, Command: sleepCommand, ReadinessURL: "http://127.0.0.1:8081/v1/models", APIKey: "coding-key"},
-			"bg-model":     {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: "http://127.0.0.1:8080/v1/models", APIKey: "bg-key"},
+			"coding-model": {Mode: config.ModeCoding, Command: sleepCommand, ReadinessURL: codingURL, APIKey: "coding-key"},
+			"bg-model":     {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "bg-key"},
 		},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 3 * time.Second}
 	s := New(cfg, time.Hour, sw, &http.Client{})
-	s.SetProbe(urlAwareProbe(":8081")) // background 永不就绪，coding 立即就绪
+	s.SetProbe(urlAwareProbe(urlPortMarker(codingURL))) // background 永不就绪，coding 立即就绪
 	ctx := context.Background()
 
 	startDone := make(chan error, 1)
@@ -176,7 +177,7 @@ func TestCodingPreemptsIdleSwitchBack(t *testing.T) {
 	time.Sleep(120 * time.Millisecond)
 
 	// background 永不就绪（模拟大模型加载慢）。
-	s.SetProbe(urlAwareProbe(":8081"))
+	s.SetProbe(urlAwareProbe(urlPortMarker(s.cfg.Entry("coding-model").ReadinessURL)))
 
 	bgErrCh := make(chan error, 1)
 	go func() {

@@ -39,13 +39,16 @@ func (s *Server) pushSchedEvent(kind string, extra map[string]any) {
 	s.hub.BroadcastWithType("scheduler", ev)
 }
 
-// schedulerForwardBCFor 返回指定模型进程的后端 API Key 注入配置（模型进程就绪且
-// 配置了自身 API Key 时生效），使客户端 key 与后端 key 隔离。
+// schedulerForwardBCFor 返回直连本地调度模型的后端配置：节点名取池内本地节点名
+// （local-<模型 ID>），使转发循环能把直连流量计入该节点的在途负载（负载感知均衡）；
+// 配置了自身 API Key 时一并注入，使客户端 key 与后端 key 隔离。coding 模型不在代理
+// 池内，其节点名不会被均衡器计入（Enter 对未知节点名忽略）。
 func (s *Server) schedulerForwardBCFor(modelID string) *config.BackendConfig {
+	cfg := &config.BackendConfig{Name: localNodeNamePrefix + modelID}
 	if key := s.scheduler.APIKeyFor(modelID); key != "" {
-		return &config.BackendConfig{APIKey: key}
+		cfg.APIKey = key
 	}
-	return nil
+	return cfg
 }
 
 // localNodeNamePrefix 是本地 background 组成员进程在代理池中的节点名前缀

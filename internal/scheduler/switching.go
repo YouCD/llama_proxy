@@ -6,8 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"llama_proxy/internal/config"
@@ -23,8 +25,15 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 	// 优雅排空在途请求（被停止的进程可能仍有人在途流量）。
 	s.drain()
 
+	// 杀掉 coding 模型前先记录显存基线：进程退出后驱动异步回收显存，
+	// 期间启动大显存模型会 OOM 崩溃循环，需等显存真正释放。
+	gpuBaseline := gpuBaselineTotal()
+
 	// 停止当前全部进程。
 	s.stopAll(ctx)
+
+	// 等被杀模型的显存释放完毕再启动新模型（无 GPU 时立即返回）。
+	s.waitForGPURelease(ctx, gpuBaseline, 60*time.Second)
 
 	// 启动目标状态的全部模型进程。
 	chs := make(map[string]chan struct{}, len(ids))
@@ -38,9 +47,12 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 		if err != nil {
 			log.WithCtx(ctx).Warnf("[scheduler] open log file %s failed: %v", entry.LogFile, err)
 		}
-		slot := &procSlot{logFile: f, readyCh: make(chan struct{})}
+		slot := &procSlot{port: readinessPort(entry), readyCh: make(chan struct{})}
 		chs[id] = slot.readyCh
 		if entry.Command != "" {
+			// 启动前确认端口无残留监听者（如上一次代理进程遗留的 setsid 服务），
+			// 否则新服务绑定端口会失败、启动超时卡死切换。
+			s.freeOccupiedPort(ctx, slot.port, s.sw.KillTimeout)
 			cmd := exec.Command("/bin/sh", "-c", entry.Command)
 			if f != nil {
 				cmd.Stdout = f
@@ -131,6 +143,39 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 	return chs, firstErr
 }
 
+// freeOccupiedPort 在启动新服务前清理端口上的残留监听进程（TERM 整树，超时
+// KILL），并确认监听释放。端口为 0（无法解析）或已空闲时直接返回。
+func (s *Scheduler) freeOccupiedPort(ctx context.Context, port int, timeout time.Duration) {
+	if port <= 0 || portListenerGone(port) {
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		pid, err := resolveServerPID(port)
+		if err != nil {
+			return
+		}
+		if pid == os.Getpid() {
+			// 端口属主是本进程（如就绪地址误配到代理自身端口，或测试内嵌监听）：
+			// 杀掉自己会让代理/测试直接死掉，只告警不清理。
+			log.WithCtx(ctx).Warnf("[scheduler] port %d is held by this process (pid %d), skipping cleanup", port, pid)
+			return
+		}
+		log.WithCtx(ctx).Warnf("[scheduler] port %d held by leftover pid %d, killing process tree before startup", port, pid)
+		group, _ := procGroupID(pid)
+		_ = killTree(pid, group, syscall.SIGTERM)
+		for pidAlive(pid) && !portListenerGone(port) && time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+		}
+		if pidAlive(pid) {
+			_ = killTree(pid, group, syscall.SIGKILL)
+		}
+		if portListenerGone(port) || time.Now().After(deadline) {
+			return
+		}
+	}
+}
+
 // describeTarget 生成在途切换登记的目标描述（coding 为模型 ID，background 组为 "group"）。
 func describeTarget(mode string, ids []string) string {
 	if mode == config.ModeCoding {
@@ -187,6 +232,8 @@ func (s *Scheduler) wasPreempted() bool {
 }
 
 // markSlotReady 标记指定模型进程就绪并关闭其就绪 channel（保证只 close 一次）。
+// 就绪探测成功即证明该模型的服务进程正在其端口上监听，顺势按端口解析并接管
+// 真实服务进程 PID（如 setsid 派生、包装脚本已退出的 vLLM 服务）。
 // 调用方自行记录日志（switchTo/reconcile 的上下文信息更完整）。
 func (s *Scheduler) markSlotReady(id string) {
 	s.mu.Lock()
@@ -196,6 +243,11 @@ func (s *Scheduler) markSlotReady(id string) {
 		return
 	}
 	sl.readyOK = true
+	if sl.port > 0 {
+		if pid, err := resolveServerPID(sl.port); err == nil {
+			sl.serverPID = pid
+		}
+	}
 	if !sl.readyChClosed {
 		sl.readyChClosed = true
 		close(sl.readyCh)

@@ -2,13 +2,34 @@ package scheduler
 
 import (
 	"context"
+	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"llama_proxy/internal/config"
 )
+
+// readinessURLFor 按端口构造就绪探测地址。
+func readinessURLFor(port int) string {
+	return "http://127.0.0.1:" + strconv.Itoa(port) + "/v1/models"
+}
+
+// urlPortMarker 从就绪地址提取 ":port" 片段，供 urlAwareProbe 区分模型。
+func urlPortMarker(readinessURL string) string {
+	u, err := url.Parse(readinessURL)
+	if err != nil {
+		return ""
+	}
+	_, port, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return ""
+	}
+	return ":" + port
+}
 
 // fakeProbe 返回一个就绪探测函数：前 attempts 次失败，之后成功。
 
@@ -35,22 +56,25 @@ func urlAwareProbe(markers ...string) func(context.Context, string) bool {
 
 const sleepCommand = "sleep 3600"
 
-// newTestScheduler 构造双模型测试调度器：coding-model（coding，8081）与
-// bg-model（background，8080，唯一 background 即隐式默认组）。
+// newTestScheduler 构造双模型测试调度器：coding-model（coding）与 bg-model
+//（background，唯一 background 即隐式默认组）。就绪端口使用随机空闲端口：
+// 就绪标记后会按端口接管真实监听进程，固定端口可能与本机其他服务撞车。
 func newTestScheduler(t *testing.T, idle time.Duration) *Scheduler {
 	t.Helper()
+	codingURL := readinessURLFor(freePort(t))
+	bgURL := readinessURLFor(freePort(t))
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
 			"coding-model": {
 				Mode:         config.ModeCoding,
 				Command:      sleepCommand,
-				ReadinessURL: "http://127.0.0.1:8081/v1/models",
+				ReadinessURL: codingURL,
 				APIKey:       "coding-key",
 			},
 			"bg-model": {
 				Mode:         config.ModeBackground,
 				Command:      sleepCommand,
-				ReadinessURL: "http://127.0.0.1:8080/v1/models",
+				ReadinessURL: bgURL,
 				APIKey:       "bg-key",
 			},
 		},
@@ -106,8 +130,8 @@ func TestStartBackgroundThenEnsureCoding(t *testing.T) {
 	if !s.IsCodingActive() {
 		t.Fatal("should be coding active after coding request")
 	}
-	if got := s.BaseURLFor("coding-model"); got != "http://127.0.0.1:8081/v1" {
-		t.Fatalf("unexpected base url: %s", got)
+	if want := apiBaseFromReadiness(s.cfg.Entry("coding-model").ReadinessURL); s.BaseURLFor("coding-model") != want {
+		t.Fatalf("unexpected base url: %s", s.BaseURLFor("coding-model"))
 	}
 	if got := s.APIKeyFor("coding-model"); got != "coding-key" {
 		t.Fatalf("coding APIKeyFor=%q, want coding-key", got)
@@ -126,8 +150,8 @@ func TestStartBackgroundThenEnsureCoding(t *testing.T) {
 func TestStartBackgroundGroupParallel(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"bg-a": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: "http://127.0.0.1:8080/v1/models", APIKey: "key-a", Weight: 2},
-			"bg-b": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: "http://127.0.0.1:8081/v1/models", APIKey: "key-b"},
+			"bg-a": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "key-a", Weight: 2},
+			"bg-b": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "key-b"},
 		},
 		Default: []string{"bg-a", "bg-b"},
 	}
@@ -151,11 +175,11 @@ func TestStartBackgroundGroupParallel(t *testing.T) {
 	for _, n := range nodes {
 		byID[n.ModelID] = n
 	}
-	if n := byID["bg-a"]; n.BaseURL != "http://127.0.0.1:8080/v1" || n.Weight != 2 {
-		t.Fatalf("bg-a node = %+v, want base 8080 weight 2", n)
+	if n := byID["bg-a"]; n.BaseURL != apiBaseFromReadiness(cfg.Entry("bg-a").ReadinessURL) || n.Weight != 2 {
+		t.Fatalf("bg-a node = %+v, want base %s weight 2", n, apiBaseFromReadiness(cfg.Entry("bg-a").ReadinessURL))
 	}
-	if n := byID["bg-b"]; n.BaseURL != "http://127.0.0.1:8081/v1" || n.Weight != 0 {
-		t.Fatalf("bg-b node = %+v, want base 8081 weight 0 (pass-through)", n)
+	if n := byID["bg-b"]; n.BaseURL != apiBaseFromReadiness(cfg.Entry("bg-b").ReadinessURL) || n.Weight != 0 {
+		t.Fatalf("bg-b node = %+v, want base %s weight 0 (pass-through)", n, apiBaseFromReadiness(cfg.Entry("bg-b").ReadinessURL))
 	}
 	snap := s.Snapshot()
 	if len(snap.Group) != 2 {
@@ -168,8 +192,8 @@ func TestStartBackgroundGroupParallel(t *testing.T) {
 func TestRestartMemberOnly(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"bg-a": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: "http://127.0.0.1:8080/v1/models"},
-			"bg-b": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: "http://127.0.0.1:8081/v1/models"},
+			"bg-a": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t))},
+			"bg-b": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t))},
 		},
 		Default: []string{"bg-a", "bg-b"},
 	}

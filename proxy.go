@@ -88,7 +88,11 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		Streaming:  isStreaming,
 		StartedAt:  time.Now().UTC(),
 	})
+	// successNode 记录成功转发所在节点：其负载在响应体完全回传前一直计入在途，
+	// 由本 defer 在处理器退出时注销；故障转移/候选耗尽路径的节点在各自分支即时注销。
+	successNode := ""
 	defer func() {
+		s.leaveNode(successNode)
 		s.inflightRemove(requestID)
 		s.active.Add(-1)
 		s.hub.BroadcastWithType("active", map[string]any{"active_connections": s.active.Load(), "time": time.Now().UTC()})
@@ -135,8 +139,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		outReq.Header.Set("X-Proxy-Request-ID", requestID)
 		outReq.ContentLength = int64(len(body))
 
+		// 负载感知：转发前把该节点在途计数 +1（直连与轮询候选都经此计入均衡器）。
+		s.enterNode(nodeOf(cand))
 		resp, err = s.client.Do(outReq)
 		if err != nil {
+			// 本次尝试已结束（无论随后故障转移还是候选耗尽），先注销该节点在途。
+			s.leaveNode(nodeOf(cand))
 			lastErr = err
 			attempts = append(attempts, backendAttempt{
 				Name:  candidateName(cand),
@@ -163,6 +171,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if resp.StatusCode != http.StatusOK {
+			// 本次尝试已结束（随后故障转移或候选耗尽），先注销该节点在途。
+			s.leaveNode(nodeOf(cand))
 			respBody, truncated := readLimited(resp.Body, maxFailReportBytes)
 			attempts = append(attempts, backendAttempt{
 				Name:       candidateName(cand),
@@ -192,6 +202,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+		// 成功路径：该节点负载保持计入在途，直到响应体回传完毕（defer 注销）。
+		successNode = nodeOf(cand)
 		break
 	}
 

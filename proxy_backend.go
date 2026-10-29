@@ -168,6 +168,29 @@ func candidateOf(b *config.BackendConfig) *backendCandidate {
 	return &backendCandidate{url: strings.TrimRight(b.URL, "/"), cfg: b}
 }
 
+// nodeOf 返回候选对应的均衡器节点名：池内后端（含本地 local-<模型 ID> 节点）用其
+// Name；无 cfg 的动态候选返回空串（Enter/Leave 对空串忽略，不参与负载计数）。
+func nodeOf(c *backendCandidate) string {
+	if c == nil || c.cfg == nil {
+		return ""
+	}
+	return c.cfg.Name
+}
+
+// enterNode 把候选节点在途计数 +1；无均衡器或空节点名时忽略。
+func (s *Server) enterNode(name string) {
+	if s.balancer != nil {
+		s.balancer.Enter(name)
+	}
+}
+
+// leaveNode 把候选节点在途计数 -1（下限 0）；无均衡器或空节点名时忽略。
+func (s *Server) leaveNode(name string) {
+	if s.balancer != nil {
+		s.balancer.Leave(name)
+	}
+}
+
 // nextBalancerCandidate 从全量池返回下一个未尝试过的后端（请求失败后的自动故障转移）。
 func (s *Server) nextBalancerCandidate(exclude map[string]bool) *backendCandidate {
 	if s.balancer == nil {

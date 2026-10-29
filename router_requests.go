@@ -97,7 +97,7 @@ func parseRequestFilter(r *http.Request) model.RequestFilter {
 	return f
 }
 
-// handleRaw 返回已落盘的原始请求/响应报文（gzip 解压后按内容类型输出）。
+// handleRaw 返回已落盘的原始请求/响应报文（zstd 解压后按内容类型输出）。
 func (s *Server) handleRaw(w http.ResponseWriter, p string) {
 	parts := strings.Split(strings.TrimPrefix(p, "/raw/"), "/")
 	if len(parts) != 2 {
@@ -132,7 +132,7 @@ func (s *Server) handleRaw(w http.ResponseWriter, p string) {
 	}
 
 	fullPath := filepath.Clean(filepath.Join(s.store.DataDir(), rel))
-	data, err := store.ReadGzipFile(fullPath)
+	data, err := store.ReadCompressedFile(fullPath)
 	if err != nil {
 		httpx.WriteJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return

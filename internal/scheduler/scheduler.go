@@ -17,12 +17,22 @@ import (
 	"github.com/youcd/toolkit/log"
 )
 // procSlot 是单个模型进程的运行时状态。readyCh 在该模型进程就绪时关闭一次。
+// cmd 是包装命令进程（/bin/sh -c 启动脚本）；serverPID 是 readiness_url 端口上
+// 实际监听服务进程的真实 PID——启动脚本可能以 setsid 派生独立会话的服务后自行
+// 退出（如 vLLM launcher），此时 cmd 退出而 serverPID 仍存活，槽位继续视为运行中。
 type procSlot struct {
 	cmd           *exec.Cmd
+	port          int      // readiness_url 解析出的监听端口（0 表示无法解析）
+	serverPID     int      // 真实服务进程 PID（端口持有者）；0 表示未知/已退出
 	logFile       *os.File
 	readyOK       bool
 	readyCh       chan struct{}
 	readyChClosed bool
+}
+
+// running 报告槽位是否仍有进程在运行：包装命令存活，或已接管到仍存活的真实服务。
+func (sl *procSlot) running() bool {
+	return sl.cmd != nil || (sl.serverPID != 0 && pidAlive(sl.serverPID))
 }
 
 // Scheduler 负责按请求的模型 ID 管理本地模型进程组：
@@ -123,7 +133,8 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown 停止全部子进程（优雅退出时调用）。
+// Shutdown 停止全部子进程（优雅退出时调用）。与 stopAll 相同，按端口接管真实
+// 服务进程并整树终止，确保 setsid 派生的推理服务不会残留占用端口/显存。
 func (s *Scheduler) Shutdown() {
 	s.mu.Lock()
 	slots := make([]*procSlot, 0, len(s.procs))
@@ -131,10 +142,9 @@ func (s *Scheduler) Shutdown() {
 		slots = append(slots, sl)
 	}
 	s.mu.Unlock()
+	deadline := time.Now().Add(s.sw.KillTimeout)
 	for _, sl := range slots {
-		if sl.cmd != nil && sl.cmd.Process != nil {
-			_ = sl.cmd.Process.Kill()
-		}
+		s.stopSlotProcess(sl, deadline)
 		if sl.logFile != nil {
 			_ = sl.logFile.Close()
 		}
@@ -163,7 +173,7 @@ func (s *Scheduler) EnsureModel(ctx context.Context, modelID string) (chan struc
 func (s *Scheduler) ensureCoding(ctx context.Context, modelID string) (chan struct{}, error) {
 	s.mu.Lock()
 	sl := s.procs[modelID]
-	if sl != nil && sl.cmd != nil {
+	if sl != nil && sl.running() {
 		ch := sl.readyCh
 		s.mu.Unlock()
 		return ch, nil
@@ -179,7 +189,7 @@ func (s *Scheduler) ensureCoding(ctx context.Context, modelID string) (chan stru
 	// 二次检查：被抢占的 background 切换完成后，本模型可能已就绪或在途。
 	s.mu.Lock()
 	sl = s.procs[modelID]
-	if sl != nil && sl.cmd != nil {
+	if sl != nil && sl.running() {
 		ch := sl.readyCh
 		s.mu.Unlock()
 		return ch, nil
@@ -207,10 +217,10 @@ func (s *Scheduler) ensureBackground(ctx context.Context, modelID string) (chan 
 		coding := s.codingModel != ""
 		sl := s.procs[modelID]
 		s.mu.Unlock()
-		// background 组态：成员在运行（就绪或待就绪）时直接等待其就绪 channel；
-		// 成员已退出时立即重启该成员，其余成员不受影响。
+		// background 组态：成员在运行（就绪或待就绪，含已接管 setsid 服务）时直接
+		// 等待其就绪 channel；成员确认退出时立即重启该成员，其余成员不受影响。
 		if !coding && sl != nil {
-			if sl.cmd == nil {
+			if !sl.running() {
 				s.restartMember(ctx, modelID)
 			}
 			ch := sl.readyCh
@@ -233,7 +243,7 @@ func (s *Scheduler) ensureBackground(ctx context.Context, modelID string) (chan 
 	coding := s.codingModel != ""
 	sl := s.procs[modelID]
 	s.mu.Unlock()
-	if !coding && sl != nil && sl.cmd != nil {
+	if !coding && sl != nil && sl.running() {
 		return sl.readyCh, nil
 	}
 
@@ -276,7 +286,7 @@ func (s *Scheduler) codingLeaseActive() bool {
 // 调用方须持有 s.mu。
 func (s *Scheduler) codingProcRunningLocked() bool {
 	for id, sl := range s.procs {
-		if sl.cmd == nil {
+		if !sl.running() {
 			continue
 		}
 		if e := s.cfg.Entry(id); e != nil && e.Mode == config.ModeCoding {

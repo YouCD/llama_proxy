@@ -92,20 +92,42 @@ func (s *Scheduler) reconcile(ctx context.Context) {
 	s.mu.Unlock()
 
 	for _, it := range items {
-		if it.sl.cmd == nil {
-			// 进程已退出：只重启 background 组成员（coding 进程由请求驱动重新加载）。
-			if it.mode == config.ModeBackground {
-				log.WithCtx(ctx).Warnf("[scheduler] background member %s process exited, restarting member only", it.id)
-				s.restartMember(ctx, it.id)
-			}
-			continue
-		}
 		if it.sl.readyOK {
 			continue
 		}
 		e := s.cfg.Entry(it.id)
 		if e == nil || e.ReadinessURL == "" {
 			continue
+		}
+		// 包装进程已退出：先按端口接管可能仍在运行的真实服务（如 setsid
+		// 派生、包装脚本已退出的推理服务）；接管成功则不重启。未接管到才
+		// 视为真正退出：只重启 background 组成员（coding 进程由请求驱动
+		// 重新加载），同时清除过期的 serverPID 登记。
+		if it.sl.cmd == nil {
+			adopted := false
+			if it.sl.port > 0 {
+				if pid, err := resolveServerPID(it.sl.port); err == nil {
+					s.mu.Lock()
+					if sl := s.procs[it.id]; sl != nil && sl.cmd == nil {
+						sl.serverPID = pid
+					}
+					s.mu.Unlock()
+					log.WithCtx(ctx).Infof("[scheduler] model %s wrapper exited, adopted detached server pid=%d", it.id, pid)
+					adopted = true
+				}
+			}
+			if !adopted {
+				s.mu.Lock()
+				if sl := s.procs[it.id]; sl != nil && sl.cmd == nil {
+					sl.serverPID = 0
+				}
+				s.mu.Unlock()
+				if it.mode == config.ModeBackground {
+					log.WithCtx(ctx).Warnf("[scheduler] background member %s process exited, restarting member only", it.id)
+					s.restartMember(ctx, it.id)
+				}
+				continue
+			}
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		if s.probeReady(probeCtx, e.ReadinessURL, e.APIKey) {
@@ -127,7 +149,8 @@ func (s *Scheduler) restartMember(ctx context.Context, id string) {
 	s.mu.Lock()
 	sl := s.procs[id]
 	e := s.cfg.Entry(id)
-	needRestart := sl != nil && sl.cmd == nil && e != nil &&
+	// needRestart：槽位存在且无存活进程（包装命令与接管的真实服务都已退出）。
+	needRestart := sl != nil && !sl.running() && e != nil &&
 		e.Mode == config.ModeBackground && s.expected[id] && e.Command != ""
 	if !needRestart {
 		s.mu.Unlock()
@@ -144,6 +167,8 @@ func (s *Scheduler) restartMember(ctx context.Context, id string) {
 	if err != nil {
 		log.WithCtx(ctx).Warnf("[scheduler] reopen log file %s failed: %v", e.LogFile, err)
 	}
+	// 重启前同样清理端口残留监听者，避免半死服务占用端口导致新进程绑定失败。
+	s.freeOccupiedPort(ctx, readinessPort(e), s.sw.KillTimeout)
 	cmd := exec.Command("/bin/sh", "-c", e.Command)
 	if f != nil {
 		cmd.Stdout = f
@@ -161,6 +186,9 @@ func (s *Scheduler) restartMember(ctx context.Context, id string) {
 	}
 	log.WithCtx(ctx).Infof("[scheduler] %s process restarted pid=%d log=%v", id, cmd.Process.Pid, f != nil)
 	s.mu.Lock()
+	if sl.port == 0 {
+		sl.port = readinessPort(e)
+	}
 	sl.cmd = cmd
 	sl.readyOK = false
 	sl.readyChClosed = false

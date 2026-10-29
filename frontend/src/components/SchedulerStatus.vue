@@ -33,10 +33,11 @@
 
       <div class="vsep"></div>
 
-      <!-- 模型成员 chips：background 组态下列出常驻组成员，coding 态下列出当前 coding 模型 -->
+      <!-- 常驻进程 chips：只列正在运行/已就绪的模型（background 组态下为常驻组成员，
+           coding 态下仅当前 coding 模型），完整模型列表由右侧「切换模型」下拉承担 -->
       <div class="sched-models">
         <div
-          v-for="m in data.models"
+          v-for="m in residentModels"
           :key="m.id"
           class="model-chip"
           :class="'mc-' + mcState(m)"
@@ -47,7 +48,7 @@
           <span v-if="m.pid" class="mono mc-pid">{{ m.pid }}</span>
           <span v-if="m.active" class="mc-cur">{{ t('schedCurrent') }}</span>
         </div>
-        <span v-if="!data.models || !data.models.length" class="cell-subtle">-</span>
+        <span v-if="!residentModels.length" class="cell-subtle">-</span>
       </div>
 
       <div class="sched-right">
@@ -161,6 +162,12 @@ async function onSwitch(modelId) {
 // 存在至少一个非当前的模型时才显示切换按钮（models 字段仅新版后端返回）。
 const switchable = computed(() =>
   (props.data?.models || []).some((m) => !m.active)
+)
+
+// 左侧 chips 只展示常驻进程（运行中或已就绪）：coding 态下仅当前 coding 模型，
+// 避免与右侧「切换模型」下拉重复罗列全部模型。
+const residentModels = computed(() =>
+  (props.data?.models || []).filter((m) => m.running || m.active)
 )
 
 const modeLabel = computed(() => {

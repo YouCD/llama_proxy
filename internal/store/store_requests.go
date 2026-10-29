@@ -38,7 +38,7 @@ func (st *Store) RepairStuckRequests() error {
 			continue
 		}
 		respAbs := filepath.Join(dataDir, respRel)
-		respBytes, err := ReadGzipFile(respAbs)
+		respBytes, err := ReadCompressedFile(respAbs)
 		if err != nil {
 			continue
 		}

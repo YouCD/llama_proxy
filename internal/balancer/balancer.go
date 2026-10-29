@@ -25,6 +25,10 @@ type Balancer struct {
 	// pools 按标签划分的后端子池：routing 规则的 pool 字段引用标签名，命中规则的
 	// 请求只从对应子池中选择（如 "tool_call" 子池即 tags 含 "tool_call" 的后端）。
 	pools map[string]balancer.Balancer
+	// inflight 每节点在途（已转发、尚未完成）请求计数，用于负载感知选点：
+	// 在途最少的节点优先，平局时沿用策略轮换。直连本地模型的流量也经 Enter/Leave
+	// 计入，使轮询请求能避开正被直连占用的节点。
+	inflight map[string]int
 }
 
 func New(backends []config.BackendConfig, strategy string) *Balancer {
@@ -64,6 +68,17 @@ func (bb *Balancer) updateBalancer(backends []config.BackendConfig) {
 	bb.pools = make(map[string]balancer.Balancer, len(tagNodes))
 	for tag, nodes := range tagNodes {
 		bb.pools[tag] = newStrategyBalancer(bb.strategy, nodes)
+	}
+
+	// 池每秒同步（本地节点就绪状态变化触发 Update）：保留仍存活节点的在途计数，
+	// 只清除已出池节点的计数——整体清零会丢掉正在转发的请求负载。
+	if bb.inflight == nil {
+		bb.inflight = make(map[string]int)
+	}
+	for name := range bb.inflight {
+		if _, ok := bb.backends[name]; !ok {
+			delete(bb.inflight, name)
+		}
 	}
 
 	bb.emitPoolLog()
@@ -160,33 +175,142 @@ func sortedNames(m map[string]int) []string {
 	return names
 }
 
-// selectFrom 从给定子池按策略选一个后端；子池为空返回 nil。调用方需持有读锁。
-func (bb *Balancer) selectFrom(bal balancer.Balancer) *config.BackendConfig {
-	if bal == nil {
-		return nil
-	}
-	name := bal.Select()
+// Enter 登记某节点一条在途请求（转发前调用）；未知节点名（不在池内）忽略。
+func (bb *Balancer) Enter(name string) {
 	if name == "" {
+		return
+	}
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	if _, ok := bb.backends[name]; ok {
+		bb.inflight[name]++
+	}
+}
+
+// Leave 注销某节点一条在途请求（请求完成/失败后调用）；计数下限为 0。
+func (bb *Balancer) Leave(name string) {
+	if name == "" {
+		return
+	}
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	if _, ok := bb.backends[name]; ok {
+		if bb.inflight[name] > 0 {
+			bb.inflight[name]--
+		}
+	}
+}
+
+// InflightCount 返回某节点当前在途请求数（未知节点为 0），供面板/测试观测。
+func (bb *Balancer) InflightCount(name string) int {
+	bb.mu.RLock()
+	defer bb.mu.RUnlock()
+	return bb.inflight[name]
+}
+
+// allEligible 返回全量池节点名集合。
+func (bb *Balancer) allEligible() map[string]bool {
+	m := make(map[string]bool, len(bb.backends))
+	for name := range bb.backends {
+		m[name] = true
+	}
+	return m
+}
+
+// selectLeastLoaded 在 elig 集合内做负载感知选点：最小化 在途/权重 比率（整型
+// 交叉相乘精确比较，避免浮点噪声破坏平局判定）——权重表达容量，均衡目标是各节点
+// 的负载密度（单位权重的在途数）相等，而非绝对在途数相等；全空闲（比率同为 0）时
+// tied 为全池，按策略轮换保留 WRR/rr 的加权公平。找到最优比率后，按策略 balancer
+// 的轮换在 tied 中选取；若在 maxTries 内未落到 tied 节点（如 tied 节点权重为 0 被
+// 轮换跳过），回退到字典序首个 tied 节点保证终止。调用方需持有读锁。
+func (bb *Balancer) selectLeastLoaded(bal balancer.Balancer, elig map[string]bool) *config.BackendConfig {
+	if bal == nil || len(bb.backends) == 0 {
 		return nil
 	}
-	if c, ok := bb.backends[name]; ok {
-		return c
+	// 最优比率以 bestNum/bestDen 表示（-1/1 为未设置）；正权重节点优先参与比较，
+	// 全为零权重时退化为按绝对在途数比较。
+	bestNum, bestDen := -1, 1
+	for name := range bb.backends {
+		if !elig[name] || bb.backends[name].Weight <= 0 {
+			continue
+		}
+		if bestNum < 0 || bb.inflight[name]*bestDen < bestNum*bb.backends[name].Weight {
+			bestNum, bestDen = bb.inflight[name], bb.backends[name].Weight
+		}
+	}
+	if bestNum < 0 {
+		bestNum, bestDen = -1, 1
+		for name := range bb.backends {
+			if !elig[name] {
+				continue
+			}
+			if bestNum < 0 || bb.inflight[name] < bestNum {
+				bestNum, bestDen = bb.inflight[name], 1
+			}
+		}
+		if bestNum < 0 {
+			return nil
+		}
+	}
+	tied := make(map[string]bool)
+	for name := range bb.backends {
+		if !elig[name] {
+			continue
+		}
+		w := bb.backends[name].Weight
+		if w > 0 {
+			if bb.inflight[name]*bestDen == bestNum*w {
+				tied[name] = true
+			}
+		} else if bestDen == 1 && bb.inflight[name] == bestNum {
+			tied[name] = true
+		}
+	}
+	// 一个完整策略周期必然覆盖池内全部正权重节点；maxTries 取全池权重和作上界。
+	maxTries := 0
+	for _, b := range bb.backends {
+		if b.Weight > 0 {
+			maxTries += b.Weight
+		}
+	}
+	if maxTries < len(bb.backends) {
+		maxTries = len(bb.backends)
+	}
+	for i := 0; i < maxTries; i++ {
+		name := bal.Select()
+		if name == "" {
+			break
+		}
+		if tied[name] {
+			if c, ok := bb.backends[name]; ok {
+				return c
+			}
+		}
+	}
+	// 回退：字典序首个 tied 节点（处理权重为 0 被轮换跳过的边界）。
+	var tiedNames []string
+	for name := range tied {
+		tiedNames = append(tiedNames, name)
+	}
+	sort.Strings(tiedNames)
+	if len(tiedNames) > 0 {
+		return bb.backends[tiedNames[0]]
 	}
 	return nil
 }
 
-// Select 从全量池按策略选一个后端；无可用后端时返回 nil。
+// Select 从全量池选在途最少（平局按策略轮换）的后端；无可用后端时返回 nil。
 func (bb *Balancer) Select() *config.BackendConfig {
 	bb.mu.RLock()
 	defer bb.mu.RUnlock()
-	return bb.selectFrom(bb.bal)
+	return bb.selectLeastLoaded(bb.bal, bb.allEligible())
 }
 
-// SelectFromTag 从指定标签的后端子池按策略选一个后端；该标签无后端时返回 nil。
+// SelectFromTag 从指定标签子池选在途最少（平局按策略轮换）的后端；该标签无后端时返回 nil。
 func (bb *Balancer) SelectFromTag(tag string) *config.BackendConfig {
 	bb.mu.RLock()
 	defer bb.mu.RUnlock()
-	return bb.selectFrom(bb.pools[tag])
+	return bb.selectLeastLoaded(bb.pools[tag], bb.tagEligible(tag, nil))
 }
 
 func (bb *Balancer) Update(backends []config.BackendConfig) {
@@ -234,12 +358,34 @@ func (bb *Balancer) GetStrategy() string {
 	return strings.TrimSpace(bb.strategy)
 }
 
-// SelectExcluding 按策略选取一个不在 exclude 中的后端，用于某后端请求失败后的
-// 自动故障转移。exclude 传入已尝试过的后端名；没有可用后端时返回 nil。
+// tagEligible 返回带 tag 标签且在 exclude 之外的节点名集合（调用方持读锁）。
+func (bb *Balancer) tagEligible(tag string, exclude map[string]bool) map[string]bool {
+	m := make(map[string]bool)
+	for name, c := range bb.backends {
+		if c.EffectiveTags()[tag] && !exclude[name] {
+			m[name] = true
+		}
+	}
+	return m
+}
+
+// excludeEligible 返回全量池中不在 exclude 内的节点名集合（调用方持读锁）。
+func (bb *Balancer) excludeEligible(exclude map[string]bool) map[string]bool {
+	m := make(map[string]bool, len(bb.backends))
+	for name := range bb.backends {
+		if !exclude[name] {
+			m[name] = true
+		}
+	}
+	return m
+}
+
+// SelectExcluding 选取一个不在 exclude 中、在途最少（平局按策略轮换）的后端，用于
+// 某后端请求失败后的自动故障转移。exclude 传入已尝试过的后端名；没有可用后端时返回 nil。
 func (bb *Balancer) SelectExcluding(exclude map[string]bool) *config.BackendConfig {
 	bb.mu.RLock()
 	defer bb.mu.RUnlock()
-	return bb.selectExcluding(bb.bal, exclude, nil)
+	return bb.selectLeastLoaded(bb.bal, bb.excludeEligible(exclude))
 }
 
 // SelectFromTagExcluding 与 SelectExcluding 相同，但只在指定标签的子池中选取，
@@ -247,37 +393,5 @@ func (bb *Balancer) SelectExcluding(exclude map[string]bool) *config.BackendConf
 func (bb *Balancer) SelectFromTagExcluding(tag string, exclude map[string]bool) *config.BackendConfig {
 	bb.mu.RLock()
 	defer bb.mu.RUnlock()
-	return bb.selectExcluding(bb.pools[tag], exclude, func(c *config.BackendConfig) bool {
-		return c.EffectiveTags()[tag]
-	})
-}
-
-// selectExcluding 反复按策略选点，跳过 exclude 中的节点以及不满足 filter 的节点，
-// 直到选到可用节点或达到尝试上限。上限取全部后端权重之和（一个完整 WRR 周期必然
-// 覆盖所有节点，rr 与 random 同理），保证终止。调用方必须持有读锁。
-func (bb *Balancer) selectExcluding(bal balancer.Balancer, exclude map[string]bool, filter func(*config.BackendConfig) bool) *config.BackendConfig {
-	if bal == nil || len(bb.backends) == 0 {
-		return nil
-	}
-	maxTries := 0
-	for _, b := range bb.backends {
-		if b.Weight > 0 {
-			maxTries += b.Weight
-		}
-	}
-	if maxTries <= 0 {
-		maxTries = len(bb.backends)
-	}
-	for i := 0; i < maxTries; i++ {
-		name := bal.Select()
-		if name == "" || exclude[name] {
-			continue
-		}
-		c, ok := bb.backends[name]
-		if !ok || (filter != nil && !filter(c)) {
-			continue
-		}
-		return c
-	}
-	return nil
+	return bb.selectLeastLoaded(bb.pools[tag], bb.tagEligible(tag, exclude))
 }

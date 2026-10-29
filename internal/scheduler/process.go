@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/youcd/toolkit/log"
@@ -59,26 +60,7 @@ func (s *Scheduler) stopAll(ctx context.Context) {
 
 	deadline := time.Now().Add(s.sw.KillTimeout)
 	for _, sl := range slots {
-		if sl.cmd != nil && sl.cmd.Process != nil {
-			done := make(chan struct{})
-			go func(cmd *exec.Cmd) {
-				_ = cmd.Process.Kill()
-				_, _ = cmd.Process.Wait()
-				close(done)
-			}(sl.cmd)
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				select {
-				case <-done:
-				case <-time.After(500 * time.Millisecond):
-				}
-				continue
-			}
-			select {
-			case <-done:
-			case <-time.After(remaining):
-			}
-		}
+		s.stopSlotProcess(sl, deadline)
 		if sl.logFile != nil {
 			_ = sl.logFile.Close()
 		}
@@ -88,17 +70,81 @@ func (s *Scheduler) stopAll(ctx context.Context) {
 	}
 }
 
-// reap 回收已退出的子进程，防止僵尸进程。进程意外退出时清空槽位的 cmd，
-// 使探活循环（reconcile）能识别退出并按成员级策略处理（background 成员重启，
-// coding 进程留给下次请求重新加载）。正常切换时 stopAll 已清空 procs，不会误触。
+// stopSlotProcess 终止单个槽位关联的全部进程并确认端口释放：
+//   - 先按端口重新解析真实服务进程（setsid 派生、包装脚本已退出的场景下
+//     槽位缓存可能缺失或过期），与包装命令进程一并作为终止目标；
+//   - 对每个目标按进程树发送 SIGTERM（会话/进程组 leader 杀整组，否则递归
+//     后代），等待目标全部退出且端口监听释放，直至 deadline；
+//   - 超时后对仍存活的目标发送 SIGKILL 并再做一次端口确认。
+//
+// 包装命令进程的僵尸回收由 reap 协程负责，此处不重复 Wait。
+func (s *Scheduler) stopSlotProcess(sl *procSlot, deadline time.Time) {
+	// 调用方（stopAll/Shutdown）均在调用前释放 s.mu，且 reap 协程会并发改写
+	// cmd/serverPID：终止目标必须在锁内快照，kill 等待在锁外进行。
+	// 槽位端口终身不变，无竞态。
+	s.mu.Lock()
+	if sl.port > 0 {
+		if pid, err := resolveServerPID(sl.port); err == nil {
+			sl.serverPID = pid
+		}
+	}
+	var targets []int
+	self := os.Getpid()
+	if sl.serverPID != 0 && pidAlive(sl.serverPID) && sl.serverPID != self {
+		targets = append(targets, sl.serverPID)
+	}
+	if sl.cmd != nil && sl.cmd.Process != nil {
+		if pid := sl.cmd.Process.Pid; pid != self && !pidIn(targets, pid) {
+			targets = append(targets, pid)
+		}
+	}
+	s.mu.Unlock()
+	if len(targets) == 0 {
+		return
+	}
+	for _, pid := range targets {
+		group, _ := procGroupID(pid)
+		_ = killTree(pid, group, syscall.SIGTERM)
+	}
+	for anyAlive(targets) || !portListenerGone(sl.port) {
+		if time.Now().After(deadline) {
+			for _, pid := range targets {
+				if !pidAlive(pid) {
+					continue
+				}
+				group, _ := procGroupID(pid)
+				_ = killTree(pid, group, syscall.SIGKILL)
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// reap 回收已退出的包装命令进程，防止僵尸进程。包装脚本退出后按端口重新解析
+// 真实服务进程：服务仍存活（如 vLLM launcher 以 setsid 派生的服务在 launcher
+// 退出后继续运行）则接管为槽位进程、维持运行态与就绪态；确认无监听者才视为
+// 真正退出（清空槽位的 cmd 与 serverPID），使探活循环（reconcile）能识别退出
+// 并按成员级策略处理（background 成员重启，coding 进程留给下次请求重新加载）。
+// 正常切换时 stopAll 已清空 procs，不会误触。
 func (s *Scheduler) reap(id string, cmd *exec.Cmd) {
 	_ = cmd.Wait()
 	s.mu.Lock()
-	if sl := s.procs[id]; sl != nil && sl.cmd == cmd {
-		sl.cmd = nil
-		sl.readyOK = false
+	defer s.mu.Unlock()
+	sl := s.procs[id]
+	if sl == nil || sl.cmd != cmd {
+		return
 	}
-	s.mu.Unlock()
+	sl.cmd = nil
+	if sl.port > 0 {
+		if pid, err := resolveServerPID(sl.port); err == nil {
+			sl.serverPID = pid
+			log.WithCtx(context.Background()).Infof("[scheduler] %s wrapper exited, adopted detached server pid=%d", id, pid)
+			return
+		}
+	}
+	sl.serverPID = 0
+	sl.readyOK = false
 }
 
 // waitReady 轮询配置的 readinessURL 本身，直到成功或超时。
