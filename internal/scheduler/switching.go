@@ -43,6 +43,19 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 			chs[id] = make(chan struct{})
 			continue
 		}
+		// 已在运行的模型（coding 切换时保留的 resident 成员）：复用原槽位与就绪
+		// channel，不重启、不清端口，避免误杀正在运行的常驻进程。
+		s.mu.Lock()
+		existing := s.procs[id]
+		running := existing != nil && existing.running()
+		s.mu.Unlock()
+		if running {
+			chs[id] = existing.readyCh
+			s.mu.Lock()
+			s.expected[id] = true
+			s.mu.Unlock()
+			continue
+		}
 		f, err := openProcessLog(entry.LogFile)
 		if err != nil {
 			log.WithCtx(ctx).Warnf("[scheduler] open log file %s failed: %v", entry.LogFile, err)
@@ -72,9 +85,9 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 		s.mu.Unlock()
 	}
 
-	// 更新状态登记：expected 集合与 coding 态标记。
+	// 更新状态登记：expected 集合与 coding 态标记。expected 采用合并而非清空：
+	// stopAll 已保留 resident 成员的登记，这里只追加目标成员，不抹掉常驻模型。
 	s.mu.Lock()
-	s.expected = make(map[string]bool, len(ids))
 	for _, id := range ids {
 		s.expected[id] = true
 	}

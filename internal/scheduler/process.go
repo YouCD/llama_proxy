@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"llama_proxy/internal/config"
+
 	"github.com/youcd/toolkit/log"
 )
 // openProcessLog 以追加模式打开进程日志文件；logFile 为空时返回 (nil, nil)。
@@ -47,14 +49,24 @@ func (s *Scheduler) drain() {
 
 // stopAll 停止当前全部子进程（共享一个 kill_timeout 总时限），关闭日志文件，
 // 清空进程槽位。切换后 expected/procs 由调用方（switchTo）重新登记。
+// 常驻（resident）background 成员例外：保留其槽位与 expected 登记，不随切换停止，
+// 使其与 coding 模型并行运行（显存共存）。
 func (s *Scheduler) stopAll(ctx context.Context) {
 	s.mu.Lock()
-	slots := make([]*procSlot, 0, len(s.procs))
-	for _, sl := range s.procs {
+	var slots []*procSlot
+	kept := make(map[string]*procSlot)
+	keptExpected := make(map[string]bool)
+	for id, sl := range s.procs {
+		e := s.cfg.Entry(id)
+		if e != nil && e.Mode == config.ModeBackground && e.Resident {
+			kept[id] = sl
+			keptExpected[id] = true
+			continue
+		}
 		slots = append(slots, sl)
 	}
-	s.procs = make(map[string]*procSlot)
-	s.expected = make(map[string]bool)
+	s.procs = kept
+	s.expected = keptExpected
 	s.codingModel = ""
 	s.mu.Unlock()
 

@@ -90,7 +90,7 @@ func (s *Server) selectScheduledModel(ctx context.Context, modelID string, entry
 		s.scheduler.TouchCoding()
 		s.pushSchedEvent("coding_request", map[string]any{"model": modelID})
 	}
-	if entry.Mode == config.ModeBackground && s.scheduler.IsCodingActive() {
+	if entry.Mode == config.ModeBackground && !entry.Resident && s.scheduler.IsCodingActive() {
 		return nil, statusErrf(http.StatusServiceUnavailable,
 			"model %q not ready: coding model is active (lease), retry later", modelID)
 	}

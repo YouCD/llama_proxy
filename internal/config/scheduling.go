@@ -31,6 +31,11 @@ const (
 //     被停止释放显存；空闲租约到期后自动切回 background 组态。
 // coding 条目可多个（按需切换）；background 条目必须全部在 default 组内。
 // lease/switch/default 为保留子 key，不得用作模型 ID。
+//
+// background 条目可附加两个可选标记：
+//   - resident：常驻模型，coding 态切换时不停止，与 coding 模型并行运行（共享
+//     显存），用于翻译/Embedding 等需全程在线的专用服务；
+//   - no_pool：不加入代理池（不被 llm_proxy 轮询命中），仅按模型 ID 直连。
 type SchedulingConfig struct {
 	Models map[string]ProcessConfig `mapstructure:"models" validate:"dive"`
 	Lease  LeaseConfig              `mapstructure:"lease"`
@@ -60,6 +65,13 @@ type ProcessConfig struct {
 	// Tags 仅对 background 生效：该节点入池后携带的路由标签，routing 规则的 pool
 	// 可与之对应（含 "tool_call" 标签即加入 tool_call 子池）。
 	Tags []string `mapstructure:"tags"`
+	// Resident 仅对 background 生效：常驻模型，coding 态切换时不停止，与 coding
+	// 模型并行运行（共享显存）。用于翻译/Embedding 等专用服务，使其在开发期间保持在线。
+	// 要求 GPU 显存同时装得下 coding 模型与全部常驻模型，否则 coding 模型加载会 OOM。
+	Resident bool `mapstructure:"resident"`
+	// NoPool 仅对 background 生效：该模型不加入代理池（不被 llm_proxy 轮询命中），
+	// 仅当请求使用其模型 ID 时直连。适合翻译/Embedding 等不应混入通用均衡流量的专用模型。
+	NoPool bool `mapstructure:"no_pool"`
 }
 
 // Entry 返回指定模型 ID 的调度条目（未配置时返回 nil）。
@@ -222,6 +234,12 @@ func validateScheduling(sc *SchedulingConfig) error {
 		}
 		if e.Command != "" && strings.TrimSpace(e.ReadinessURL) == "" {
 			return fmt.Errorf("%s: 配置了 command 时必须指定 readiness_url（就绪探测地址）", where)
+		}
+		if e.Resident && e.Mode != ModeBackground {
+			return fmt.Errorf("%s: resident 仅支持 background 模式", where)
+		}
+		if e.NoPool && e.Mode != ModeBackground {
+			return fmt.Errorf("%s: no_pool 仅支持 background 模式", where)
 		}
 	}
 	for _, d := range sc.DefaultBackgroundGroup() {

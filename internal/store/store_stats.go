@@ -320,7 +320,7 @@ func lifetimeCacheHitPct(prompt, cached int64) float64 {
 	return float64(cached) / float64(prompt) * 100
 }
 
-// tokenBreakdownByModel 按模型聚合 token 构成（输入/缓存/输出/命中率）。
+// tokenBreakdownByModel 按模型聚合 token 构成（输入/缓存/输出/命中率），只返回 token 总量前 10 的模型。
 // 查询失败时返回空列表，不影响主统计返回。
 func (st *Store) tokenBreakdownByModel(f model.RequestFilter) []map[string]any {
 	query := `SELECT
@@ -332,7 +332,7 @@ func (st *Store) tokenBreakdownByModel(f model.RequestFilter) []map[string]any {
 		WHERE model IS NOT NULL AND TRIM(model) != ''`
 	args := []any{}
 	query, args = appendRequestFilterSQL(query, args, f, st.isPostgres)
-	query += ` GROUP BY model ORDER BY SUM(prompt_tokens) + SUM(completion_tokens) DESC`
+	query += ` GROUP BY model ORDER BY SUM(prompt_tokens) + SUM(completion_tokens) DESC LIMIT 10`
 
 	rows, err := st.db.Raw(query, args...).Rows()
 	if err != nil {

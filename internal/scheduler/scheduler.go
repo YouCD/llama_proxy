@@ -213,10 +213,20 @@ func (s *Scheduler) ensureBackground(ctx context.Context, modelID string) (chan 
 		if id != modelID {
 			continue
 		}
+		e := s.cfg.Entry(modelID)
 		s.mu.Lock()
 		coding := s.codingModel != ""
 		sl := s.procs[modelID]
 		s.mu.Unlock()
+		// 常驻模型：coding 态下同样常驻。在运行→直接返回就绪 channel；已退出→
+		// 原地重启（同 background 组态），不按 coding 租约跳过切换。
+		if e != nil && e.Resident && sl != nil {
+			if !sl.running() {
+				s.restartMember(ctx, modelID)
+			}
+			ch := sl.readyCh
+			return ch, nil
+		}
 		// background 组态：成员在运行（就绪或待就绪，含已接管 setsid 服务）时直接
 		// 等待其就绪 channel；成员确认退出时立即重启该成员，其余成员不受影响。
 		if !coding && sl != nil {
@@ -351,6 +361,10 @@ func (s *Scheduler) LocalNodes() []LocalNode {
 		}
 		e := s.cfg.Entry(id)
 		if e == nil || e.Mode != config.ModeBackground {
+			continue
+		}
+		// no_pool 模型不加入代理池（仅按模型 ID 直连），不返回为池节点。
+		if e.NoPool {
 			continue
 		}
 		out = append(out, LocalNode{

@@ -48,9 +48,9 @@ func (s *Server) apiSchedulerSwitch(c *gin.Context) {
 			map[string]any{"error": fmt.Sprintf("model %q is not configured in scheduling", modelID)})
 		return
 	}
-	// 目标为 background 且 coding 租约仍活跃：ensureModel 会保护正在使用的 coding
-	// 进程跳过切换（与流量驱动的 background 请求行为一致），此处提前给出明确提示。
-	if entry.Mode == config.ModeBackground && s.scheduler.IsCodingActive() {
+	// 目标为 background 且 coding 租约仍活跃（非常驻）：ensureModel 会保护正在使用的
+	// coding 进程跳过切换，此处提前给出明确提示。常驻模型始终在线，不受此限制。
+	if entry.Mode == config.ModeBackground && !entry.Resident && s.scheduler.IsCodingActive() {
 		httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{
 			"status":  "skipped",
 			"model":   modelID,
