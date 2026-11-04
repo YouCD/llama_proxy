@@ -473,6 +473,51 @@ scheduling:
 	if err == nil || !strings.Contains(err.Error(), "保留 key") {
 		t.Fatalf("expected reserved-key error, got %v", err)
 	}
+
+	// sleep_timeout 配在 coding 模型上：报错（仅支持 background）
+	err = writeAndLoad(`
+scheduling:
+  code-a:
+    mode: coding
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+    sleep_timeout: 1h
+`)
+	if err == nil || !strings.Contains(err.Error(), "sleep_timeout 仅支持 background") {
+		t.Fatalf("expected sleep_timeout-on-coding error, got %v", err)
+	}
+
+	// sleep_timeout 配在 background 但缺 no_pool：报错（池内成员闲置判定失真）
+	err = writeAndLoad(`
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+    sleep_timeout: 1h
+  default: ["bg-a"]
+`)
+	if err == nil || !strings.Contains(err.Error(), "no_pool") {
+		t.Fatalf("expected sleep_timeout-without-no_pool error, got %v", err)
+	}
+
+	// sleep_timeout 配在 no_pool background 上：合法（专用模型闲置休眠）
+	if err := writeAndLoad(`
+scheduling:
+  trans:
+    mode: background
+    no_pool: true
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+    sleep_timeout: 30m
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8081"
+  default: ["bg-a", "trans"]
+`); err != nil {
+		t.Fatalf("sleep_timeout with no_pool background should load, got %v", err)
+	}
 }
 
 // TestLoadYAMLConfigRouting 验证 routing 规则解析与校验：合法配置正常加载，

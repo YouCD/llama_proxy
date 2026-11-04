@@ -91,12 +91,23 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// successNode 记录成功转发所在节点：其负载在响应体完全回传前一直计入在途，
 	// 由本 defer 在处理器退出时注销；故障转移/候选耗尽路径的节点在各自分支即时注销。
 	successNode := ""
+	// schedModel 记录本次请求命中的本地调度模型：其进程在途计数在 defer 里统一
+	// 注销，休眠判定要求该模型无在途请求才停进程。直连本地模型不走故障转移
+	// （noFailover），一次请求只计一次。
+	schedModel := ""
 	defer func() {
 		s.leaveNode(successNode)
+		if schedModel != "" && s.scheduler != nil {
+			s.scheduler.ModelLeave(schedModel)
+		}
 		s.inflightRemove(requestID)
 		s.active.Add(-1)
 		s.hub.BroadcastWithType("active", map[string]any{"active_connections": s.active.Load(), "time": time.Now().UTC()})
 	}()
+	if firstCand.schedModel != "" && s.scheduler != nil {
+		schedModel = firstCand.schedModel
+		s.scheduler.ModelEnter(schedModel)
+	}
 
 	// 转发请求：当前后端失败（连接错误，或响应体写出前返回非 200 状态码）时自动尝试
 	// 下一个未试过的后端，直到成功或候选耗尽。候选耗尽时把每个后端的请求结果按后端

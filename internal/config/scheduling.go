@@ -72,6 +72,14 @@ type ProcessConfig struct {
 	// NoPool 仅对 background 生效：该模型不加入代理池（不被 llm_proxy 轮询命中），
 	// 仅当请求使用其模型 ID 时直连。适合翻译/Embedding 等不应混入通用均衡流量的专用模型。
 	NoPool bool `mapstructure:"no_pool"`
+	// SleepTimeout 仅对 background 生效：该成员无在途请求、且距最近一次请求（或首次
+	// 就绪）超过该时长后，调度器主动停止其进程释放显存（休眠）；下次请求该模型 ID 时
+	// 按需重新加载唤醒。0 表示禁用休眠（默认，成员就绪后永久常驻）。与 resident 正交：
+	// resident 决定 coding 切换时是否保留，SleepTimeout 决定闲置时是否停进程。
+	// 要求 NoPool：休眠判定依赖"全部流量都是按模型 ID 的直连请求"（可被 TouchModel
+	// 完整观测）；池内成员还会被 llm_proxy 轮询命中（不经过 TouchModel），闲置判定会
+	// 失真，故禁止对池内成员配置休眠。
+	SleepTimeout time.Duration `mapstructure:"sleep_timeout"`
 }
 
 // Entry 返回指定模型 ID 的调度条目（未配置时返回 nil）。
@@ -240,6 +248,14 @@ func validateScheduling(sc *SchedulingConfig) error {
 		}
 		if e.NoPool && e.Mode != ModeBackground {
 			return fmt.Errorf("%s: no_pool 仅支持 background 模式", where)
+		}
+		if e.SleepTimeout > 0 {
+			if e.Mode != ModeBackground {
+				return fmt.Errorf("%s: sleep_timeout 仅支持 background 模式", where)
+			}
+			if !e.NoPool {
+				return fmt.Errorf("%s: 配置 sleep_timeout 时必须同时设置 no_pool（池内成员会被轮询命中，闲置判定失真）", where)
+			}
 		}
 	}
 	for _, d := range sc.DefaultBackgroundGroup() {

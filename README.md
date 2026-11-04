@@ -67,6 +67,9 @@ English UI：
 - **单进程共享端口**：同一时刻只有一个本地进程在运行。请求某模型 ID 时，代理按该条目 `command` 启动 `llama-server`（先排空在途请求、杀掉旧进程），轮询 `readiness_url` 直到就绪；客户端请求期间代理注入该进程自己的 `api_key`。
 - **coding 模式（按需）**：收到流量才切换；距最后一次 coding 模型流量超过 `scheduling.lease.coding_idle_timeout`（例 30m）后，代理优雅停掉 coding 进程并切回**默认 background**，避免大模型常驻占用显存。
 - **background 模式（常驻）**：启动时加载**默认 background**（仅一个 background 时隐式为它；多个 background 时必须指定 `scheduling.default`）。就绪后以条目 `weight`（缺省 1）作为名为 `local-background` 的动态节点加入代理池参与负载均衡；探测失败或进程意外退出时自动出池，恢复就绪后重新入池。
+- **`resident`（background 可选）**：coding 切换时**保留**该 background 成员（不被杀掉、PID 不变），coding 态下仍可直连；coding 空闲切回 background 组时也不重启它。适合需要与 coding 模型并存于显存、且切换时不想反复加载的大模型。默认 `false`（coding 切换时随 background 组一起停止）。
+- **`no_pool`（background 可选）**：该模型**不入代理池**（不被 `llm_prox` 默认流量轮询命中），仅当请求体 `model` 恰好是它的模型 ID 时直连。适合翻译 / Embedding / 分类等不应混入通用均衡流量的**专用模型**。与 `resident` 正交：`resident` 决定 coding 切换时是否保留，`no_pool` 决定是否入池。
+- **`sleep_timeout`（background 可选，需配合 `no_pool`）**：该成员**无在途请求**、且距最近一次请求（或首次就绪）超过该时长后，调度器**主动停其进程释放显存**（休眠）；下次请求该模型 ID 时按需重新加载唤醒。`0`（缺省）禁用休眠，成员就绪后永久常驻。**必须同时设 `no_pool`**：休眠判定依赖"全部流量都是按模型 ID 的直连请求"（可被代理层完整观测）；池内成员还会被 `llm_prox` 轮询命中（不经过休眠观测点），闲置判定会失真，故禁止对池内成员配置休眠。休眠成员不出现在代理池、不占显存，组切换也不打扰它；只有直接请求该模型 ID 才会唤醒。
 - **切换**：停旧进程前按 `switch.drain_timeout` 优雅排空在途请求，`kill_timeout` 内未退出则强杀；新进程按 `startup_timeout` 等待就绪。
 - **优先级抢占**：coding > background。background 加载（或空闲切回）期间收到 coding 模型流量时，coding 切换直接抢占在途的 background 切换（取消其就绪等待）并立即开始加载 coding，而不是排队等 background 加载完成——两者共用同一端口，background 本来就要先被杀掉；启动时首次 background 加载被抢占不视为致命错误。反之，coding 租约仍活跃时 background 模型请求被拒（503），不会杀掉正在使用的 coding 进程。
 
@@ -292,6 +295,18 @@ scheduling:
     api_key: "your-api-key"
     weight: 1   # 就绪后作为动态节点加入代理池的权重，与 backends.list 一起负载均衡，缺省 1
     log_file: "./data/background.log"
+  # 专用翻译模型：不入代理池、闲置休眠。no_pool 使其仅被 model="translator" 的直连请求命中；
+  # sleep_timeout 使其无在途请求且闲置超过 30m 后自动停进程释放显存，下次请求按需唤醒。
+  translator:
+    command: >
+      /usr/local/bin/llama-server
+      -m /path/to/translator.gguf
+      --host 0.0.0.0 --port 8082 -c 8192
+    model: "translator"                # 请求体 model 为该值即直连该进程
+    readiness_url: "http://127.0.0.1:8082/v1/models"  # 必填
+    no_pool: true                      # 不入代理池，仅直连命中
+    sleep_timeout: 30m                 # 闲置 30m 且无在途请求后自动休眠（需配合 no_pool）
+    log_file: "./data/translator.log"
   lease:
     coding_idle_timeout: 30m  # 距最后一次 coding 流量超过该时长即切回 background
   switch:

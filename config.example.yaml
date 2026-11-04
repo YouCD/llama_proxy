@@ -111,6 +111,21 @@ proxy:
 #    readiness_url: "http://127.0.0.1:8081/v1/models"
 #    api_key: "your-api-key"
 #    log_file: "./data/bg-large.log"
+#  # 专用模型（不入池 + 闲置休眠）：no_pool 使其仅被 model="translator" 的直连请求命中，
+#  # 不被 llm_prox 默认流量轮询；sleep_timeout 使其无在途请求且闲置超过阈值后自动停进程
+#  # 释放显存（休眠），下次请求该模型 ID 时按需重新加载唤醒。sleep_timeout 必须配 no_pool
+#  # （池内成员还会被轮询命中，闲置判定失真，配置校验直接报错）。与 resident 正交。
+#  translator:
+#    mode: background
+#    command: >
+#      /usr/local/bin/llama-server
+#      -m /path/to/translator.gguf
+#      -dev 0 --host 127.0.0.1 --port 8082 -c 8192
+#    readiness_url: "http://127.0.0.1:8082/v1/models"
+#    api_key: "your-api-key"
+#    no_pool: true            # 不入代理池，仅直连命中
+#    sleep_timeout: 30m       # 闲置 30m 且无在途请求后自动休眠（0 禁用）
+#    log_file: "./data/translator.log"
 #  # coding 模型：双卡张量并行独占运行。coding 条目互斥运行（同一时刻只跑一个），
 #  # 可共用同一端口，也可与 background 成员共用端口（coding 运行期间 background
 #  # 组已停止）；但不得与 backends.list 后端同 origin（启动时校验）。

@@ -35,12 +35,15 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 	// 等被杀模型的显存释放完毕再启动新模型（无 GPU 时立即返回）。
 	s.waitForGPURelease(ctx, gpuBaseline, 60*time.Second)
 
-	// 启动目标状态的全部模型进程。
+	// 启动目标状态的全部模型进程。toWait 收集需要等待就绪的成员（启动中的与已在
+	// 运行的）；休眠成员被跳过——组切换不打扰休眠，仅保留 expected 登记。
 	chs := make(map[string]chan struct{}, len(ids))
+	var toWait []string
 	for _, id := range ids {
 		entry := s.cfg.Entry(id)
 		if entry == nil {
 			chs[id] = make(chan struct{})
+			toWait = append(toWait, id)
 			continue
 		}
 		// 已在运行的模型（coding 切换时保留的 resident 成员）：复用原槽位与就绪
@@ -48,9 +51,19 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 		s.mu.Lock()
 		existing := s.procs[id]
 		running := existing != nil && existing.running()
+		sleeping := existing != nil && existing.sleeping
 		s.mu.Unlock()
 		if running {
 			chs[id] = existing.readyCh
+			s.mu.Lock()
+			s.expected[id] = true
+			s.mu.Unlock()
+			toWait = append(toWait, id)
+			continue
+		}
+		if sleeping {
+			// 休眠成员：组切换不打扰它——不唤醒、不启动、不等待就绪，仅保留 expected
+			// 登记。它由直接请求经 ensureBackground→restartMember 唤醒。
 			s.mu.Lock()
 			s.expected[id] = true
 			s.mu.Unlock()
@@ -83,6 +96,7 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 		s.procs[id] = slot
 		s.expected[id] = true
 		s.mu.Unlock()
+		toWait = append(toWait, id)
 	}
 
 	// 更新状态登记：expected 集合与 coding 态标记。expected 采用合并而非清空：
@@ -113,25 +127,29 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 		id  string
 		err error
 	}
-	resCh := make(chan result, len(ids))
-	for _, id := range ids {
+	resCh := make(chan result, len(toWait))
+	for _, id := range toWait {
 		entry := s.cfg.Entry(id)
 		if entry == nil || entry.Command == "" {
 			// 无真实命令（测试桩）：直接探测。
-			resCh <- result{id, s.waitReady(switchCtx, entry.ReadinessURL, entry.APIKey, s.sw.StartupTimeout)}
+			resCh <- result{id, s.waitReady(switchCtx, "", entry.ReadinessURL, entry.APIKey, s.sw.StartupTimeout, false)}
 			continue
 		}
 		go func(id string, e *config.ProcessConfig) {
-			resCh <- result{id, s.waitReady(switchCtx, e.ReadinessURL, e.APIKey, s.sw.StartupTimeout)}
+			// 监控进程存活：成员启动失败（进程未就绪即退出）时快速返回，不空等
+			// 整个 startup_timeout 占着 switchMu 阻塞后续切换。
+			resCh <- result{id, s.waitReady(switchCtx, id, e.ReadinessURL, e.APIKey, s.sw.StartupTimeout, true)}
 		}(id, entry)
 	}
 
 	var firstErr error
-	for range ids {
+	var errID string
+	for range toWait {
 		r := <-resCh
 		if r.err == nil {
 			s.markSlotReady(r.id)
 		} else if firstErr == nil {
+			errID = r.id
 			if errors.Is(r.err, context.Canceled) {
 				firstErr = fmt.Errorf("%s switch preempted by higher-priority request", r.id)
 			} else {
@@ -142,6 +160,7 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 
 	s.mu.Lock()
 	wasPreempted := s.preempted
+	slotDead := errID != "" && s.slotDeadLocked(errID)
 	s.clearSwitchInflightLocked()
 	s.mu.Unlock()
 	if firstErr == nil {
@@ -150,6 +169,8 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 	}
 	if wasPreempted && errors.Is(switchCtx.Err(), context.Canceled) {
 		log.WithCtx(ctx).Infof("[scheduler] %s switch preempted by higher-priority request", strings.Join(ids, ","))
+	} else if slotDead {
+		log.WithCtx(ctx).Warnf("[scheduler] %s startup failed: process exited before ready (failure recorded, restart backoff applied)", strings.Join(ids, ","))
 	} else {
 		log.WithCtx(ctx).Warnf("[scheduler] %s: %v (still running, will reconcile later)", strings.Join(ids, ","), firstErr)
 	}
@@ -214,17 +235,26 @@ func switchPriority(mode string) int {
 // 插队，而不是排队等 background 加载完成。被抢占的切换会在 waitReady 中观察到
 // 取消，重置状态并释放 switchMu，随后本次切换正常执行（其 stopAll 会杀掉
 // 被抢占切换刚启动的进程）。
-func (s *Scheduler) preemptLowerPriority(ctx context.Context, mode string) {
+func (s *Scheduler) preemptLowerPriority(ctx context.Context, mode, target string) {
 	s.mu.Lock()
 	prev := s.switchMode
+	prevTarget := s.switchTarget
 	cancel := s.switchCancel
-	if cancel == nil || switchPriority(mode) <= switchPriority(prev) {
+	if cancel == nil {
+		s.mu.Unlock()
+		return
+	}
+	// 特例：coding 切 coding 且目标模型不同时，允许抢占正在加载/等待的同级
+	// coding 切换（用户连点切换或改选另一个 coding 模型时，不必等旧模型加载完，
+	// 也不必等旧模型启动失败的空等结束）。
+	samePriorityDifferentTarget := mode == config.ModeCoding && prev == config.ModeCoding && target != "" && target != prevTarget
+	if switchPriority(mode) <= switchPriority(prev) && !samePriorityDifferentTarget {
 		s.mu.Unlock()
 		return
 	}
 	s.preempted = true
 	s.mu.Unlock()
-	log.WithCtx(ctx).Infof("[scheduler] preempting in-flight %s switch with %s request", prev, mode)
+	log.WithCtx(ctx).Infof("[scheduler] preempting in-flight %s switch (%s) with %s request", prev, prevTarget, mode)
 	cancel()
 }
 
@@ -256,6 +286,12 @@ func (s *Scheduler) markSlotReady(id string) {
 		return
 	}
 	sl.readyOK = true
+	s.clearStartupFailLocked(id)
+	// 锚定闲置时钟：从未被直接请求过的成员，以其首次就绪时刻为闲置起点，避免
+	// "刚就绪即因 lastActiveAt 为零值被误判"或"永远不睡"。
+	if t := s.lastActiveAt[id]; t.IsZero() {
+		s.lastActiveAt[id] = time.Now()
+	}
 	if sl.port > 0 {
 		if pid, err := resolveServerPID(sl.port); err == nil {
 			sl.serverPID = pid

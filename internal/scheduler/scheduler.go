@@ -28,6 +28,10 @@ type procSlot struct {
 	readyOK       bool
 	readyCh       chan struct{}
 	readyChClosed bool
+	// sleeping 标记主动休眠：成员因闲置被调度器停进程，等待直接请求经
+	// ensureBackground→restartMember 唤醒。区别于崩溃：reap 观察到 sleeping 不记
+	// 失败、不退避，reconcile 不自动拉起，组切换（switchTo）也不打扰它。
+	sleeping bool
 }
 
 // running 报告槽位是否仍有进程在运行：包装命令存活，或已接管到仍存活的真实服务。
@@ -71,7 +75,26 @@ type Scheduler struct {
 	codingModel string               // coding 态下运行的模型 ID；background 组态为空
 	lastCodingAt time.Time
 	started       bool
+
+	// failCount/nextRestartAt 跟踪"启动失败退避"：模型进程在未就绪前退出
+	//（启动失败/崩溃）时累加计数，退避窗口内不重复拉起同一模型，防止必然失败
+	// 的启动（如 vLLM 因 vm.overcommit_memory 取消启动）被请求风暴反复触发。
+	// 模型就绪后清零。failBackoff 为基础退避时长（翻倍递增，上限 5min）。
+	failCount     map[string]int
+	nextRestartAt map[string]time.Time
+	failBackoff   time.Duration
+
+	// lastActiveAt 记录每个本地调度模型最近一次被请求（或首次就绪，由 markSlotReady
+	// 锚定）的时间，用于休眠判定。inflight 记录每个本地调度模型当前在途请求数，由
+	// 代理层 ModelEnter/ModelLeave 维护，休眠前要求为 0，避免停掉仍有人使用的进程。
+	// no_pool 休眠模型的全部流量都是按模型 ID 的直连请求，经 TouchModel/ModelEnter
+	// 完整观测，故闲置判定不失真。均由 s.mu 保护。
+	lastActiveAt map[string]time.Time
+	inflight     map[string]int
 }
+
+// maxStartupBackoff 是启动失败退避的上限。
+const maxStartupBackoff = 5 * time.Minute
 
 // NewScheduler 基于调度配置创建一个调度器。日志走全局 log（[scheduler] 前缀）。
 func New(cfg *config.SchedulingConfig, lease time.Duration, sw config.SwitchConfig, client *http.Client) *Scheduler {
@@ -83,6 +106,11 @@ func New(cfg *config.SchedulingConfig, lease time.Duration, sw config.SwitchConf
 		probeInterval: 5 * time.Second,
 		procs:         make(map[string]*procSlot),
 		expected:      make(map[string]bool),
+		failCount:     make(map[string]int),
+		nextRestartAt: make(map[string]time.Time),
+		failBackoff:   30 * time.Second,
+		lastActiveAt:  make(map[string]time.Time),
+		inflight:      make(map[string]int),
 	}
 }
 
@@ -140,6 +168,9 @@ func (s *Scheduler) Shutdown() {
 	slots := make([]*procSlot, 0, len(s.procs))
 	for _, sl := range s.procs {
 		slots = append(slots, sl)
+		// 清空槽位进程引用：主动关停不是启动失败，迟到的 reap 不应记录失败。
+		sl.cmd = nil
+		sl.serverPID = 0
 	}
 	s.mu.Unlock()
 	deadline := time.Now().Add(s.sw.KillTimeout)
@@ -178,10 +209,20 @@ func (s *Scheduler) ensureCoding(ctx context.Context, modelID string) (chan stru
 		s.mu.Unlock()
 		return ch, nil
 	}
+	// 启动失败退避：模型刚因启动失败/崩溃退出且退避窗口未过时，不重复拉起
+	//（避免必然失败的启动被请求风暴反复触发），直接返回明确错误。
+	if s.backoffActiveLocked(modelID) {
+		nt := s.nextRestartAt[modelID]
+		n := s.failCount[modelID]
+		s.mu.Unlock()
+		return nil, fmt.Errorf("model %q failed to start %d time(s) in a row; retrying at %s",
+			modelID, n, nt.Format(time.RFC3339))
+	}
 	s.mu.Unlock()
 
-	// 高优先级请求抢占在途的更低优先级切换（background 组加载），先于获取 switchMu。
-	s.preemptLowerPriority(ctx, config.ModeCoding)
+	// 高优先级请求抢占在途的更低优先级切换（background 组加载；或切换到其他
+	// coding 模型时抢占正在加载的同级 coding 切换），先于获取 switchMu。
+	s.preemptLowerPriority(ctx, config.ModeCoding, modelID)
 
 	s.switchMu.Lock()
 	defer s.switchMu.Unlock()
@@ -269,18 +310,99 @@ func (s *Scheduler) TouchCoding() {
 	s.mu.Unlock()
 }
 
-// IsCodingActive 报告当前是否处于开发状态：即正在运行 coding 模式模型进程，
-// 或距离最后一次 coding 模型流量仍在租约内。
+// TouchModel 刷新指定模型最近一次被请求的时间。代理层在命中本地 background 调度
+// 模型时调用，用于休眠判定（距最近一次请求超过 sleep_timeout 且无在途请求才睡）。
+func (s *Scheduler) TouchModel(modelID string) {
+	s.mu.Lock()
+	s.lastActiveAt[modelID] = time.Now()
+	s.mu.Unlock()
+}
+
+// ModelEnter 把指定模型的在途请求计数 +1。代理层转发到本地调度模型前调用。
+func (s *Scheduler) ModelEnter(modelID string) {
+	s.mu.Lock()
+	s.inflight[modelID]++
+	s.mu.Unlock()
+}
+
+// ModelLeave 把指定模型的在途请求计数 -1（下限 0）。代理层请求结束时调用。
+func (s *Scheduler) ModelLeave(modelID string) {
+	s.mu.Lock()
+	if s.inflight[modelID] > 0 {
+		s.inflight[modelID]--
+	}
+	s.mu.Unlock()
+}
+
+// idleForSleep 报告指定模型是否闲置到可休眠：无在途请求，且距最近一次请求（或
+// 首次就绪）已超过 timeout。
+func (s *Scheduler) idleForSleep(id string, timeout time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.inflight[id] > 0 {
+		return false
+	}
+	last := s.lastActiveAt[id]
+	return !last.IsZero() && time.Since(last) > timeout
+}
+
+// IsCodingActive 报告当前是否处于开发状态：coding 模式模型进程正在运行
+//（服务中或加载中）。进程已退出时返回 false——死亡的 coding 进程不占用
+// background 模型，也不应让 background 请求在租约窗口内持续被 503 拒绝；
+// 租约到期后的自动切回由 Loop 的租约分支负责。
 func (s *Scheduler) IsCodingActive() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.codingProcRunningLocked() {
-		return true
+	return s.codingProcRunningLocked()
+}
+
+// codingSlotReadyLocked 报告当前 coding 模型槽位是否已就绪。调用方须持有 s.mu。
+func (s *Scheduler) codingSlotReadyLocked() bool {
+	if s.codingModel == "" {
+		return false
 	}
-	if s.lease > 0 && !s.lastCodingAt.IsZero() && time.Since(s.lastCodingAt) < s.lease {
-		return true
+	sl := s.procs[s.codingModel]
+	return sl != nil && sl.readyOK
+}
+
+// slotDeadLocked 报告槽位进程是否已确认退出：槽位被移除（切换已接管），或
+// 包装命令与接管的真实服务都不在运行。调用方须持有 s.mu。
+func (s *Scheduler) slotDeadLocked(id string) bool {
+	sl := s.procs[id]
+	return sl == nil || !sl.running()
+}
+
+// recordStartupFailLocked 记录一次进程退出（未就绪即退出或就绪后崩溃），
+// 返回下次允许重启的时间：第 1 次允许立即重试，之后按 failBackoff 翻倍
+// 退避、上限 maxStartupBackoff。调用方须持有 s.mu。
+func (s *Scheduler) recordStartupFailLocked(id string) time.Time {
+	s.failCount[id]++
+	n := s.failCount[id]
+	if n <= 1 {
+		return time.Time{}
 	}
-	return false
+	backoff := s.failBackoff
+	for i := 1; i < n-1 && backoff < maxStartupBackoff; i++ {
+		backoff *= 2
+	}
+	if backoff > maxStartupBackoff {
+		backoff = maxStartupBackoff
+	}
+	nt := time.Now().Add(backoff)
+	s.nextRestartAt[id] = nt
+	return nt
+}
+
+// clearStartupFailLocked 模型就绪后清零失败计数与退避。调用方须持有 s.mu。
+func (s *Scheduler) clearStartupFailLocked(id string) {
+	delete(s.failCount, id)
+	delete(s.nextRestartAt, id)
+}
+
+// backoffActiveLocked 报告指定模型是否仍处于启动失败退避窗口内。调用方须持有 s.mu。
+func (s *Scheduler) backoffActiveLocked(id string) bool {
+	nt, ok := s.nextRestartAt[id]
+	return ok && time.Now().Before(nt)
 }
 
 // codingLeaseActive 报告 coding 租约当前是否活跃：coding 模式模型进程在运行，

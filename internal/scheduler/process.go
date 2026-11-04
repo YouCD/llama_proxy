@@ -156,11 +156,68 @@ func (s *Scheduler) reap(id string, cmd *exec.Cmd) {
 		}
 	}
 	sl.serverPID = 0
+	wasReady := sl.readyOK
 	sl.readyOK = false
+	// 主动休眠（sleepMember 先置 sleeping 再杀进程）：不是启动失败/崩溃，不记失败、
+	// 不退避，由直接请求经 ensureBackground→restartMember 唤醒。
+	if sl.sleeping {
+		return
+	}
+	nxt := s.recordStartupFailLocked(id)
+	n := s.failCount[id]
+	if wasReady {
+		log.WithCtx(context.Background()).Warnf("[scheduler] %s process crashed after ready (fail #%d)", id, n)
+	} else if nxt.IsZero() {
+		log.WithCtx(context.Background()).Warnf("[scheduler] %s process exited before ready (fail #%d)", id, n)
+	} else {
+		log.WithCtx(context.Background()).Warnf("[scheduler] %s process exited before ready (fail #%d, retrying after %s)", id, n, nxt.Format(time.RFC3339))
+	}
 }
 
-// waitReady 轮询配置的 readinessURL 本身，直到成功或超时。
-func (s *Scheduler) waitReady(ctx context.Context, baseURL, apiKey string, timeout time.Duration) error {
+// sleepMember 主动停止一个闲置的 background 成员进程以释放显存（休眠）。与崩溃
+// 不同：它是计划内停止，reap 观察到 sleeping 标记不记失败、不退避，reconcile 不再
+// 自动拉起，仅由直接请求经 ensureBackground→restartMember 唤醒。停之前要求成员已
+// 就绪且无在途请求（调用方 reconcile 已判定，此处防御性再确认）。持 switchMu 与
+// 整组切换互斥。先置 sleeping 再杀进程，使 reap 在包装脚本退出时能识别为休眠。
+func (s *Scheduler) sleepMember(ctx context.Context, id string) {
+	s.switchMu.Lock()
+	defer s.switchMu.Unlock()
+	s.mu.Lock()
+	sl := s.procs[id]
+	e := s.cfg.Entry(id)
+	if sl == nil || !sl.running() || !sl.readyOK || sl.sleeping || e == nil || s.inflight[id] > 0 {
+		s.mu.Unlock()
+		return
+	}
+	sl.sleeping = true
+	// 立即可观测为未就绪：唤醒前的请求拿到 "not ready"，而非转发到垂死进程。
+	sl.readyOK = false
+	s.mu.Unlock()
+	deadline := time.Now().Add(s.sw.KillTimeout)
+	s.stopSlotProcess(sl, deadline)
+	s.mu.Lock()
+	sl.cmd = nil
+	sl.serverPID = 0
+	if sl.logFile != nil {
+		_ = sl.logFile.Close()
+		sl.logFile = nil
+	}
+	// 休眠 = 不再就绪。旧的 readyCh 已关闭（就绪过）且无在途等待者，换成一个
+	// 全新的未关闭 channel：唤醒后 markSlotReady 会 close 它，使等待者真正等到
+	// 重载完成，而非拿到旧的已关闭 channel 的虚假“就绪”。崩溃恢复路径不经过
+	// 这里，仍复用原 channel（保持既有测试语义）。
+	sl.readyCh = make(chan struct{})
+	sl.readyChClosed = false
+	s.clearStartupFailLocked(id)
+	s.mu.Unlock()
+	log.WithCtx(ctx).Infof("[scheduler] model %s idle, sleeping (process stopped, memory released)", id)
+}
+
+// waitReady 轮询配置的 readinessURL，直到成功或超时。watchProc 为真时等待
+// 期间持续检查槽位进程存活：进程在就绪前退出（启动失败/崩溃，如 vLLM 因
+// vm.overcommit_memory 取消启动）立即返回错误，而不是空等整个 startup_timeout
+// 占着 switchMu——否则后续每一次模型切换都要先等上一次失败模型的空等结束。
+func (s *Scheduler) waitReady(ctx context.Context, id, baseURL, apiKey string, timeout time.Duration, watchProc bool) error {
 	if baseURL == "" {
 		return fmt.Errorf("readiness_url is empty")
 	}
@@ -172,12 +229,22 @@ func (s *Scheduler) waitReady(ctx context.Context, baseURL, apiKey string, timeo
 		if s.probeReady(probeCtx, baseURL, apiKey) {
 			return nil
 		}
+		if watchProc && s.slotDead(id) {
+			return fmt.Errorf("process exited before ready")
+		}
 		select {
 		case <-probeCtx.Done():
 			return probeCtx.Err()
 		case <-ticker.C:
 		}
 	}
+}
+
+// slotDead 报告槽位进程是否已确认退出（见 slotDeadLocked）。
+func (s *Scheduler) slotDead(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.slotDeadLocked(id)
 }
 
 func (s *Scheduler) probeReady(ctx context.Context, url, apiKey string) bool {

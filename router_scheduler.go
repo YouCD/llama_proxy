@@ -156,6 +156,12 @@ func (s *Server) schedulerStatus() map[string]any {
 		if st.PID != 0 {
 			m["pid"] = st.PID
 		}
+		if st.FailCount > 0 {
+			m["fail_count"] = st.FailCount
+			if st.NextRetry != nil {
+				m["next_retry"] = st.NextRetry.UTC().Format(time.RFC3339)
+			}
+		}
 		models = append(models, m)
 	}
 	status["models"] = models

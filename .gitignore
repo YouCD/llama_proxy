@@ -17,3 +17,4 @@ config.yaml
 .idea
 llama-proxy
 llama_proxy
+.openidea/

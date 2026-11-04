@@ -90,6 +90,11 @@ func (s *Server) selectScheduledModel(ctx context.Context, modelID string, entry
 		s.scheduler.TouchCoding()
 		s.pushSchedEvent("coding_request", map[string]any{"model": modelID})
 	}
+	if entry.Mode == config.ModeBackground {
+		// 刷新该模型的最近请求时间，供休眠判定（距最近请求超过 sleep_timeout
+		// 且无在途请求时，reconcile 会停其进程释放显存）。
+		s.scheduler.TouchModel(modelID)
+	}
 	if entry.Mode == config.ModeBackground && !entry.Resident && s.scheduler.IsCodingActive() {
 		return nil, statusErrf(http.StatusServiceUnavailable,
 			"model %q not ready: coding model is active (lease), retry later", modelID)
@@ -110,7 +115,7 @@ func (s *Server) selectScheduledModel(ctx context.Context, modelID string, entry
 	if entry.Mode == config.ModeCoding {
 		s.scheduler.TouchCoding()
 	}
-	return &backendCandidate{url: strings.TrimRight(base, "/"), cfg: s.schedulerForwardBCFor(modelID)}, nil
+	return &backendCandidate{url: strings.TrimRight(base, "/"), cfg: s.schedulerForwardBCFor(modelID), schedModel: modelID}, nil
 }
 
 // schedulingConfig 返回调度配置（未启用调度时为 nil）。
@@ -126,6 +131,9 @@ func (s *Server) schedulingConfig() *config.SchedulingConfig {
 type backendCandidate struct {
 	url string
 	cfg *config.BackendConfig
+	// schedModel 是本地调度模型 ID（直连本地调度进程时非空）：代理层据此按模型
+	// 维护在途计数（ModelEnter/ModelLeave），供休眠判定"无在途请求才停进程"。
+	schedModel string
 }
 
 // backendAttempt 记录单个后端的请求结果，用于所有后端失败时把完整的故障转移过程

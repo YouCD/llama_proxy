@@ -176,7 +176,7 @@ func TestWaitReadySendsAuthorization(t *testing.T) {
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: time.Second}
 	s := New(cfg, time.Hour, sw, server.Client())
 
-	if err := s.waitReady(context.Background(), server.URL, "secret-token", time.Second); err != nil {
+	if err := s.waitReady(context.Background(), "", server.URL, "secret-token", time.Second, false); err != nil {
 		t.Fatalf("waitReady: %v", err)
 	}
 	if gotAuth != "Bearer secret-token" {

@@ -136,9 +136,26 @@ func TestSchedulerSwitchBackgroundSkippedWhenCodingLeaseActive(t *testing.T) {
 	proxy := httptest.NewServer(svc)
 	defer proxy.Close()
 
-	// 续期 coding 租约：当前 background 模型在租约内不得被 background 切换打断。
+	// 先切到 coding 模型（进程运行中），再续期 coding 租约：租约内的
+	// background 切换不得打断正在使用的 coding 进程。coding 进程已退出时
+	// 租约不再保护（无进程可保护），background 切换照常执行（恢复路径）。
+	code, out := doSwitch(t, proxy.URL, `{"model":"coding-m"}`)
+	if code != http.StatusAccepted {
+		t.Fatalf("coding switch = %d (%v), want 202", code, out)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		snap := svc.scheduler.Snapshot()
+		if snap.CodingModel == "coding-m" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for coding-m, coding_model=%q", snap.CodingModel)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	svc.scheduler.TouchCoding()
-	code, out := doSwitch(t, proxy.URL, `{"model":"bg-model"}`)
+	code, out = doSwitch(t, proxy.URL, `{"model":"bg-model"}`)
 	if code != http.StatusOK {
 		t.Fatalf("background switch with active lease = %d, want 200", code)
 	}

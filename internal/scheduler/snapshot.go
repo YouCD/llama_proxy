@@ -9,12 +9,14 @@ import (
 )
 // ModelStatus 是单个模型的运行时状态（监控面板展示用）。
 type ModelStatus struct {
-	ID      string
-	Mode    string
-	Running bool // 进程在运行
-	Ready   bool
-	PID     int
-	InGroup bool // 是否属于常驻默认 background 组
+	ID        string
+	Mode      string
+	Running   bool // 进程在运行
+	Ready     bool
+	PID       int
+	InGroup   bool // 是否属于常驻默认 background 组
+	FailCount int  // 连续启动失败（未就绪即退出/崩溃）次数，就绪后清零
+	NextRetry *time.Time // 启动失败退避：该时刻前不重复拉起；nil 表示无退避
 }
 
 // Snapshot 为调度器内部状态的只读快照，供监控面板展示。
@@ -60,6 +62,13 @@ func (s *Scheduler) Snapshot() Snapshot {
 			} else if sl.cmd != nil && sl.cmd.Process != nil {
 				st.PID = sl.cmd.Process.Pid
 			}
+		}
+		if n, ok := s.failCount[id]; ok {
+			st.FailCount = n
+		}
+		if nt, ok := s.nextRestartAt[id]; ok && time.Now().Before(nt) {
+			t := nt
+			st.NextRetry = &t
 		}
 		snap.Models = append(snap.Models, st)
 	}
