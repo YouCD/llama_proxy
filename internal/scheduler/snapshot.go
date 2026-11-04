@@ -15,6 +15,8 @@ type ModelStatus struct {
 	Ready     bool
 	PID       int
 	InGroup   bool // 是否属于常驻默认 background 组
+	NoPool    bool // 不入代理池（仅按模型 ID 直连）；不参与整体 background 就绪判定
+	Sleeping  bool // 计划内休眠（闲置超时后主动停进程），属健康状态而非故障
 	FailCount int  // 连续启动失败（未就绪即退出/崩溃）次数，就绪后清零
 	NextRetry *time.Time // 启动失败退避：该时刻前不重复拉起；nil 表示无退避
 }
@@ -52,10 +54,11 @@ func (s *Scheduler) Snapshot() Snapshot {
 	}
 	for _, id := range ids {
 		e := s.cfg.Entry(id)
-		st := ModelStatus{ID: id, Mode: e.Mode, InGroup: inGroup[id]}
+		st := ModelStatus{ID: id, Mode: e.Mode, InGroup: inGroup[id], NoPool: e.NoPool}
 		if sl := s.procs[id]; sl != nil {
 			st.Running = sl.running()
 			st.Ready = sl.readyOK
+			st.Sleeping = sl.sleeping
 			// 优先展示真实服务进程 PID（端口持有者）；未知时回退包装进程 PID。
 			if sl.serverPID != 0 {
 				st.PID = sl.serverPID

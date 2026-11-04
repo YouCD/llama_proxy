@@ -180,6 +180,7 @@ const modeLabel = computed(() => {
 function mcState(m) {
   if (m.error) return 'err'
   if (m.fail_count > 0) return 'fail'
+  if (m.sleeping) return 'sleeping'
   if (m.ready) return 'ok'
   return m.running ? 'loading' : 'stopped'
 }
@@ -191,6 +192,7 @@ function mcTitle(m) {
     if (m.next_retry) s += ` · ${m.next_retry}`
     return s
   }
+  if (m.sleeping) return t('schedSleeping')
   if (m.ready) return t('schedReady')
   if (m.running) return t('schedLoading')
   return t('schedStopped')
@@ -374,6 +376,16 @@ const badgeLabel = computed(() => {
 @keyframes mc-fail-pulse {
   from { opacity: 1; }
   to { opacity: 0.45; }
+}
+.model-chip.mc-sleeping {
+  border-color: rgba(147, 112, 219, 0.5);
+}
+.model-chip.mc-sleeping .mc-dot {
+  background: #9370db;
+  box-shadow: 0 0 6px rgba(147, 112, 219, 0.55);
+}
+.model-chip.mc-sleeping .mc-id {
+  color: #b09be0;
 }
 
 .sched-right {
