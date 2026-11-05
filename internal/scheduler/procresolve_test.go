@@ -164,9 +164,9 @@ func TestSwitchKillsDetachedServer(t *testing.T) {
 				Mode:         config.ModeBackground,
 				Command:      detachedCommand(port),
 				ReadinessURL: fmt.Sprintf("http://127.0.0.1:%d/v1/models", port),
+				Autostart:    true,
 			},
 		},
-		Default: []string{"detached-b"},
 	}
 	sw := config.SwitchConfig{DrainTimeout: 200 * time.Millisecond, KillTimeout: 10 * time.Second, StartupTimeout: 30 * time.Second}
 	s := New(cfg, time.Hour, sw, &http.Client{})

@@ -49,8 +49,11 @@ func (s *Scheduler) drain() {
 
 // stopAll 停止当前全部子进程（共享一个 kill_timeout 总时限），关闭日志文件，
 // 清空进程槽位。切换后 expected/procs 由调用方（switchTo）重新登记。
-// 常驻（resident）background 成员例外：保留其槽位与 expected 登记，不随切换停止，
-// 使其与 coding 模型并行运行（显存共存）。
+// 幸存者（保留槽位与 expected 登记，不随切换停止）：
+//   - resident background 成员：与 coding 模型并行运行（显存共存），卡被它钉死；
+//   - 未声明 gpu 的 background 成员（纯 CPU）：不占显存，coding 无需为其让位，
+//     天然幸存——“coding 切换只停占卡的模型”。
+// switchTo 对幸存的在运行成员复用原槽位，不重启。
 func (s *Scheduler) stopAll(ctx context.Context) {
 	s.mu.Lock()
 	var slots []*procSlot
@@ -58,7 +61,7 @@ func (s *Scheduler) stopAll(ctx context.Context) {
 	keptExpected := make(map[string]bool)
 	for id, sl := range s.procs {
 		e := s.cfg.Entry(id)
-		if e != nil && e.Mode == config.ModeBackground && e.Resident {
+		if e != nil && e.Mode == config.ModeBackground && (e.Resident || e.GPU == "") {
 			kept[id] = sl
 			keptExpected[id] = true
 			continue
@@ -178,7 +181,7 @@ func (s *Scheduler) reap(id string, cmd *exec.Cmd) {
 // 不同：它是计划内停止，reap 观察到 sleeping 标记不记失败、不退避，reconcile 不再
 // 自动拉起，仅由直接请求经 ensureBackground→restartMember 唤醒。停之前要求成员已
 // 就绪且无在途请求（调用方 reconcile 已判定，此处防御性再确认）。持 switchMu 与
-// 整组切换互斥。先置 sleeping 再杀进程，使 reap 在包装脚本退出时能识别为休眠。
+// 整组切换互斥。
 func (s *Scheduler) sleepMember(ctx context.Context, id string) {
 	s.switchMu.Lock()
 	defer s.switchMu.Unlock()
@@ -189,6 +192,17 @@ func (s *Scheduler) sleepMember(ctx context.Context, id string) {
 		s.mu.Unlock()
 		return
 	}
+	s.mu.Unlock()
+	s.suspendSlot(ctx, id, sl)
+	log.WithCtx(ctx).Infof("[scheduler] model %s idle, sleeping (process stopped, memory released)", id)
+}
+
+// suspendSlot 停止槽位进程并将其置为休眠态（计划内停止：reap 不记失败不退避，
+// reconcile 不自动拉起，组切换不打扰，仅由直接请求唤醒）。先置 sleeping 再杀
+// 进程，使 reap 在包装脚本退出时能识别为休眠而非崩溃。调用方须持有 switchMu，
+// 槽位须存在且进程存活。
+func (s *Scheduler) suspendSlot(ctx context.Context, id string, sl *procSlot) {
+	s.mu.Lock()
 	sl.sleeping = true
 	// 立即可观测为未就绪：唤醒前的请求拿到 "not ready"，而非转发到垂死进程。
 	sl.readyOK = false
@@ -202,7 +216,7 @@ func (s *Scheduler) sleepMember(ctx context.Context, id string) {
 		_ = sl.logFile.Close()
 		sl.logFile = nil
 	}
-	// 休眠 = 不再就绪。旧的 readyCh 已关闭（就绪过）且无在途等待者，换成一个
+	// 休眠/驱逐 = 不再就绪。旧的 readyCh 已关闭（就绪过）且无在途等待者，换成一个
 	// 全新的未关闭 channel：唤醒后 markSlotReady 会 close 它，使等待者真正等到
 	// 重载完成，而非拿到旧的已关闭 channel 的虚假“就绪”。崩溃恢复路径不经过
 	// 这里，仍复用原 channel（保持既有测试语义）。
@@ -210,7 +224,6 @@ func (s *Scheduler) sleepMember(ctx context.Context, id string) {
 	sl.readyChClosed = false
 	s.clearStartupFailLocked(id)
 	s.mu.Unlock()
-	log.WithCtx(ctx).Infof("[scheduler] model %s idle, sleeping (process stopped, memory released)", id)
 }
 
 // waitReady 轮询配置的 readinessURL，直到成功或超时。watchProc 为真时等待

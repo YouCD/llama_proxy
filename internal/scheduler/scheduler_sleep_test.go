@@ -22,9 +22,9 @@ func newSleepTestScheduler(t *testing.T, timeout time.Duration) *Scheduler {
 				SleepTimeout: timeout,
 				Command:      sleepCommand,
 				ReadinessURL: url,
+				Autostart:    true,
 			},
 		},
-		Default: []string{"sleepy"},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 500 * time.Millisecond}
 	s := New(cfg, time.Hour, sw, &http.Client{})

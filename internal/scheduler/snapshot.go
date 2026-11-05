@@ -14,7 +14,9 @@ type ModelStatus struct {
 	Running   bool // 进程在运行
 	Ready     bool
 	PID       int
-	InGroup   bool // 是否属于常驻默认 background 组
+	InGroup   bool // 是否属于默认 background 组（启动集）；false 的 background 为按需加载
+	Resident  bool // 常驻模型：coding 态切换时不停止，与 coding 模型并行运行
+	GPU       string // 声明占用的 GPU（如 "CUDA1"）；同卡非 resident 模型互斥换入
 	NoPool    bool // 不入代理池（仅按模型 ID 直连）；不参与整体 background 就绪判定
 	Sleeping  bool // 计划内休眠（闲置超时后主动停进程），属健康状态而非故障
 	FailCount int  // 连续启动失败（未就绪即退出/崩溃）次数，就绪后清零
@@ -54,7 +56,7 @@ func (s *Scheduler) Snapshot() Snapshot {
 	}
 	for _, id := range ids {
 		e := s.cfg.Entry(id)
-		st := ModelStatus{ID: id, Mode: e.Mode, InGroup: inGroup[id], NoPool: e.NoPool}
+		st := ModelStatus{ID: id, Mode: e.Mode, InGroup: inGroup[id], Resident: e.Resident, GPU: e.GPU, NoPool: e.NoPool}
 		if sl := s.procs[id]; sl != nil {
 			st.Running = sl.running()
 			st.Ready = sl.readyOK

@@ -143,15 +143,19 @@ func (s *Server) schedulerStatus() map[string]any {
 	models := make([]map[string]any, 0, len(snap.Models))
 	for _, st := range snap.Models {
 		// active：当前已就绪且可直连——coding 进程须为当前 coding 模型；
-		// background 成员须在组态下（coding 态本地成员全部停止）且属于默认组。
+		// background 须处于可服务状态：coding 态下幸存的模型（resident 或纯 CPU，
+		// 后者不占显存、切换不停）仍在线，声明了 gpu 的非 resident 成员在 coding 态
+		// 全部停止（含按需加载的成员）。
 		active := st.Ready && ((st.Mode == "coding" && snap.CodingModel == st.ID) ||
-			(st.Mode == "background" && st.InGroup && snap.CodingModel == ""))
+			(st.Mode == "background" && (st.Resident || st.GPU == "" || snap.CodingModel == "")))
 		m := map[string]any{
 			"id":       st.ID,
 			"mode":     st.Mode,
 			"running":  st.Running,
 			"ready":    st.Ready,
 			"in_group": st.InGroup,
+			"resident": st.Resident,
+			"gpu":      st.GPU,
 			"no_pool":  st.NoPool,
 			"sleeping": st.Sleeping,
 			"pid":      nil,

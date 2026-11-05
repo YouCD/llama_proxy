@@ -10,17 +10,16 @@ import (
 )
 
 // newResidentTestScheduler 构造三模型调度器：coding-model（coding）、
-// resident-model（background+resident 常驻）、bg-model（background 非常驻）。
-// 全部立即就绪。
+// resident-model（background+resident 常驻）、bg-model（background 非常驻、声明
+// CUDA0，coding 切换时被停止让显存）。全部立即就绪。
 func newResidentTestScheduler(t *testing.T, idle time.Duration) *Scheduler {
 	t.Helper()
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
 			"coding-model":    {Mode: config.ModeCoding, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "coding-key"},
-			"resident-model":  {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "resident-key", Resident: true},
-			"bg-model":        {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "bg-key"},
+			"resident-model":  {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "resident-key", Resident: true, Autostart: true},
+			"bg-model":        {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "bg-key", GPU: "CUDA0", Autostart: true},
 		},
-		Default: []string{"resident-model", "bg-model"},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 500 * time.Millisecond}
 	s := New(cfg, idle, sw, &http.Client{})
@@ -168,10 +167,9 @@ func TestResidentNotRestartedOnSwitchBack(t *testing.T) {
 func TestNoPoolExcludedFromLocalNodes(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"pool-model":   {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t))},
-			"nopool-model": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), NoPool: true},
+			"pool-model":   {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), Autostart: true},
+			"nopool-model": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), NoPool: true, Autostart: true},
 		},
-		Default: []string{"pool-model", "nopool-model"},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 500 * time.Millisecond}
 	s := New(cfg, time.Hour, sw, &http.Client{})

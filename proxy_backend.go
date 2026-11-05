@@ -83,8 +83,9 @@ func (s *Server) selectSpecificBackend(r *http.Request, ctx context.Context, req
 }
 
 // selectScheduledModel 把请求路由到指定模型的本地调度进程：未就绪则触发切换并等待；
-// coding 模式流量续期开发租约并广播事件；background 模式请求在 coding 租约仍活跃时
-// 被拒（503），保护正在使用的 coding 进程。
+// coding 模式流量续期开发租约并广播事件；background 模式请求在 coding 租约仍活跃时，
+// 仅当该模型声明了 gpu（切换时被停止让显存）才拒（503）；纯 CPU 模型（未声明 gpu）
+// 不占显存、coding 切换不停它，coding 态下照常服务。
 func (s *Server) selectScheduledModel(ctx context.Context, modelID string, entry *config.ProcessConfig) (*backendCandidate, error) {
 	if entry.Mode == config.ModeCoding {
 		s.scheduler.TouchCoding()
@@ -95,7 +96,7 @@ func (s *Server) selectScheduledModel(ctx context.Context, modelID string, entry
 		// 且无在途请求时，reconcile 会停其进程释放显存）。
 		s.scheduler.TouchModel(modelID)
 	}
-	if entry.Mode == config.ModeBackground && !entry.Resident && s.scheduler.IsCodingActive() {
+	if entry.Mode == config.ModeBackground && !entry.Resident && entry.GPU != "" && s.scheduler.IsCodingActive() {
 		return nil, statusErrf(http.StatusServiceUnavailable,
 			"model %q not ready: coding model is active (lease), retry later", modelID)
 	}

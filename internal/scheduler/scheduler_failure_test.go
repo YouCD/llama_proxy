@@ -28,9 +28,8 @@ func failTestScheduler(t *testing.T, lease time.Duration) (*Scheduler, string) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
 			"coding-a": {Mode: config.ModeCoding, Command: "true", ReadinessURL: codingURL, APIKey: "coding-key"},
-			"bg-model": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: bgURL, APIKey: "bg-key"},
+			"bg-model": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: bgURL, APIKey: "bg-key", Autostart: true},
 		},
-		Default: []string{"bg-model"},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 30 * time.Second}
 	s := New(cfg, lease, sw, &http.Client{})
@@ -294,9 +293,8 @@ func TestRestartMemberBackoff(t *testing.T) {
 	url := readinessURLFor(freePort(t))
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"bg-fail": {Mode: config.ModeBackground, Command: "true", ReadinessURL: url},
+			"bg-fail": {Mode: config.ModeBackground, Command: "true", ReadinessURL: url, Autostart: true},
 		},
-		Default: []string{"bg-fail"},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 30 * time.Second}
 	s := New(cfg, time.Hour, sw, &http.Client{})

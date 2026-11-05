@@ -102,7 +102,7 @@ func TestCodingPreemptsBackgroundStartup(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
 			"coding-model": {Mode: config.ModeCoding, Command: sleepCommand, ReadinessURL: codingURL, APIKey: "coding-key"},
-			"bg-model":     {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "bg-key"},
+			"bg-model":     {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "bg-key", Autostart: true},
 		},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 3 * time.Second}
@@ -267,5 +267,37 @@ func TestStartThenCodingReadyClosed(t *testing.T) {
 	coding, readyMap = snapshotState(s)
 	if coding != "coding-model" || !readyMap["coding-model"] {
 		t.Fatalf("expected coding ready, got coding=%q ready=%v", coding, readyMap)
+	}
+}
+
+// TestStartCancelledCtxNotFatal 模拟 Ctrl+C：Start 被已取消的 ctx 调用时，首次
+// background 组加载被打断（Shutdown 已杀掉正在加载的进程，waitReady 返回
+// context.Canceled），不得报致命错误——main.go 对 Start 的任何错误都会 Fatalf。
+func TestStartCancelledCtxNotFatal(t *testing.T) {
+	s := newTestScheduler(t, time.Hour)
+	defer s.Shutdown()
+	s.SetProbe(func(context.Context, string) bool { return false }) // 永不就绪：waitReady 只能经 ctx 取消结束
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("Start with cancelled ctx must not be fatal, got: %v", err)
+	}
+}
+
+// TestSwitchToCancelledCtxNotPreempted 验证调用方 ctx 取消（优雅关停）不被误标为
+// "被更高优先级请求抢占"：s.preempted 只由 preemptLowerPriority 置位，关停打断
+// 属于"就绪探测失败（context canceled）"而非抢占。
+func TestSwitchToCancelledCtxNotPreempted(t *testing.T) {
+	s := newTestScheduler(t, time.Hour)
+	defer s.Shutdown()
+	s.SetProbe(func(context.Context, string) bool { return false }) // 永不就绪：waitReady 只能经 ctx 取消结束
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := s.switchTo(ctx, []string{"bg-model"}, config.ModeBackground)
+	if err == nil {
+		t.Fatal("expected error from cancelled switchTo")
+	}
+	if strings.Contains(err.Error(), "preempted") {
+		t.Fatalf("cancelled switch mislabeled as preempted: %v", err)
 	}
 }

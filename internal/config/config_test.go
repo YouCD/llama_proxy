@@ -166,6 +166,7 @@ scheduling:
     mode: background
     command: "llama-server -m bg.gguf --port 8080"
     readiness_url: "http://127.0.0.1:8080"
+    autostart: true
     weight: 3
     tags: ["tool_call"]
   lease:
@@ -197,7 +198,7 @@ scheduling:
 	}
 	group := cfg.Scheduling.DefaultBackgroundGroup()
 	if len(group) != 1 || group[0] != "qwen3.6" {
-		t.Fatalf("default background group=%v, want [qwen3.6]", group)
+		t.Fatalf("autostart group=%v, want [qwen3.6]", group)
 	}
 	if cfg.Scheduling.Lease.CodingIdleTimeout != 45*time.Minute {
 		t.Fatalf("idle timeout=%v", cfg.Scheduling.Lease.CodingIdleTimeout)
@@ -281,8 +282,8 @@ func LoadYAMLForTest(t *testing.T, content string) error {
 
 // TestLoadYAMLConfigSchedulingValidation 验证调度启动校验：缺 mode / 非法 mode /
 // 缺 readiness_url 时报错；模型 ID（key）与 backends.list 重复或与 llama_proxy
-// 冲突时报错；多个 background 未指定 default 时报错；default 指向非 background
-// 条目时报错；保留 key 用作模型 ID 时报错。
+// 冲突时报错；autostart 配在 coding 条目上时报错；保留 key 用作模型 ID 时报错；
+// gpu 仲裁（resident 独占、启动集内同卡）报错。
 func TestLoadYAMLConfigSchedulingValidation(t *testing.T) {
 	writeAndLoad := func(content string) error {
 		return LoadYAMLForTest(t, content)
@@ -351,26 +352,8 @@ scheduling:
 		t.Fatalf("expected proxy-id conflict error, got %v", err)
 	}
 
-	// 多个 background 未指定 default
-	err = writeAndLoad(`
-scheduling:
-  bg-a:
-    mode: background
-    command: "llama-server"
-    readiness_url: "http://127.0.0.1:8080"
-  bg-b:
-    mode: background
-    command: "llama-server"
-    readiness_url: "http://127.0.0.1:8080"
-`)
-	if err == nil || !strings.Contains(err.Error(), "default") {
-		t.Fatalf("expected missing-default error, got %v", err)
-	}
-
-	// 多个 background 全部列入 default 组：合法，且多个 coding 也合法。
-	// background 成员并行常驻必须各自不同端口；coding 互斥运行，可共用同一端口，
-	// 也可与 background 成员共用端口（coding 运行期间 background 组已停止）。
-	content := `
+	// 两个 background 均未 autostart：合法（全部按需加载，启动时不拉起任何进程）
+	if err := writeAndLoad(`
 scheduling:
   bg-a:
     mode: background
@@ -380,6 +363,25 @@ scheduling:
     mode: background
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8081"
+`); err != nil {
+		t.Fatalf("all-on-demand background should load, got %v", err)
+	}
+
+	// 多个 background 列入 autostart 启动集：合法，且多个 coding 也合法。
+	// background 成员并行常驻必须各自不同端口；coding 互斥运行，可共用同一端口，
+	// 也可与 background 成员共用端口（coding 运行期间 background 组已停止）。
+	content := `
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+    autostart: true
+  bg-b:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8081"
+    autostart: true
   code-a:
     mode: coding
     command: "llama-server"
@@ -388,10 +390,9 @@ scheduling:
     mode: coding
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8080"
-  default: ["bg-a", "bg-b"]
 `
 	if err := writeAndLoad(content); err != nil {
-		t.Fatalf("multi coding/background with default should load, got %v", err)
+		t.Fatalf("multi coding/background with autostart should load, got %v", err)
 	}
 
 	// coding 条目与 backends.list 同 origin：报错（coding 运行时后端仍在服务）
@@ -405,34 +406,33 @@ scheduling:
     mode: background
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8081"
+    autostart: true
   code-a:
     mode: coding
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8080/v1/models"
-  default: ["bg-a"]
 `)
 	if err == nil || !strings.Contains(err.Error(), "端口冲突") {
 		t.Fatalf("expected coding/backend port collision, got %v", err)
 	}
 
-	// background 未全部列入 default 组：报错（不在组内的 background 永远不会加载）
-	err = writeAndLoad(`
+	// 非 autostart background 不在启动集：合法（按需加载，启动时不拉起）
+	if err := writeAndLoad(`
 scheduling:
   bg-a:
     mode: background
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8080"
+    autostart: true
   bg-b:
     mode: background
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8081"
-  default: ["bg-a"]
-`)
-	if err == nil || !strings.Contains(err.Error(), "default") {
-		t.Fatalf("expected background-outside-group error, got %v", err)
+`); err != nil {
+		t.Fatalf("non-autostart background should load (on-demand), got %v", err)
 	}
 
-	// default 指向 coding 条目
+	// autostart 配在 coding 模型上：报错（coding 永远按需）
 	err = writeAndLoad(`
 scheduling:
   bg-a:
@@ -443,23 +443,10 @@ scheduling:
     mode: coding
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8080"
-  default: "code-a"
+    autostart: true
 `)
-	if err == nil || !strings.Contains(err.Error(), "default") {
-		t.Fatalf("expected default-not-background error, got %v", err)
-	}
-
-	// default 指向不存在的条目
-	err = writeAndLoad(`
-scheduling:
-  bg-a:
-    mode: background
-    command: "llama-server"
-    readiness_url: "http://127.0.0.1:8080"
-  default: "no-such-model"
-`)
-	if err == nil || !strings.Contains(err.Error(), "default") {
-		t.Fatalf("expected unknown-default error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "autostart") {
+		t.Fatalf("expected autostart-on-coding error, got %v", err)
 	}
 
 	// 保留 key 用作模型 ID
@@ -495,7 +482,7 @@ scheduling:
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8080"
     sleep_timeout: 1h
-  default: ["bg-a"]
+    autostart: true
 `)
 	if err == nil || !strings.Contains(err.Error(), "no_pool") {
 		t.Fatalf("expected sleep_timeout-without-no_pool error, got %v", err)
@@ -510,13 +497,132 @@ scheduling:
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8080"
     sleep_timeout: 30m
+    autostart: true
   bg-a:
     mode: background
     command: "llama-server"
     readiness_url: "http://127.0.0.1:8081"
-  default: ["bg-a", "trans"]
+    autostart: true
 `); err != nil {
 		t.Fatalf("sleep_timeout with no_pool background should load, got %v", err)
+	}
+
+	// gpu 被 resident 独占：其他模型声明同一 gpu 报错
+	err = writeAndLoad(`
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+    resident: true
+    gpu: "CUDA0"
+    autostart: true
+  bg-b:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8081"
+    gpu: "CUDA0"
+`)
+	if err == nil || !strings.Contains(err.Error(), "独占") {
+		t.Fatalf("expected gpu-resident-pin error, got %v", err)
+	}
+
+	// 两个 resident 声明同一 gpu：报错（bg-b 在组外 = 按需常驻，同样受 resident 独占约束）
+	err = writeAndLoad(`
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+    resident: true
+    gpu: "CUDA1"
+  bg-b:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8081"
+    resident: true
+    gpu: "cuda1"
+    autostart: true
+`)
+	if err == nil || !strings.Contains(err.Error(), "独占") {
+		t.Fatalf("expected two-residents-same-gpu error, got %v", err)
+	}
+
+	// 启动集（autostart）内两个成员声明同一 gpu：报错（启动时并行加载会抢同一张卡）
+	err = writeAndLoad(`
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+    gpu: "CUDA1"
+    autostart: true
+  bg-b:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8081"
+    gpu: "CUDA1"
+    autostart: true
+`)
+	if err == nil || !strings.Contains(err.Error(), "同一张卡") {
+		t.Fatalf("expected startup-same-gpu error, got %v", err)
+	}
+
+	// autostart 成员与按需成员声明同一 gpu：合法（运行时互斥换入）
+	if err := writeAndLoad(`
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+    gpu: "CUDA1"
+    autostart: true
+  bg-b:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8081"
+    gpu: "CUDA1"
+`); err != nil {
+		t.Fatalf("autostart/on-demand gpu sharing should load (runtime swap), got %v", err)
+	}
+
+	// 同 gpu 非 resident 模型共用端口：合法（运行时互斥，换入时先杀旧监听者）
+	if err := writeAndLoad(`
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+    gpu: "CUDA1"
+  bg-b:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+    gpu: "CUDA1"
+    autostart: true
+`); err != nil {
+		t.Fatalf("same-gpu non-resident port sharing should load, got %v", err)
+	}
+
+	// 同 gpu 但一方 resident：共存——该组合已被 validateScheduling 的 resident 独占
+	// 规则提前拦截（gpu 独占校验先于端口校验），不会走到端口冲突分支。
+
+	// GPU 模型与无 GPU 模型共用端口：共存，端口冲突
+	err = writeAndLoad(`
+scheduling:
+  bg-a:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+    gpu: "CUDA1"
+    autostart: true
+  bg-b:
+    mode: background
+    command: "llama-server"
+    readiness_url: "http://127.0.0.1:8080"
+`)
+	if err == nil || !strings.Contains(err.Error(), "端口冲突") {
+		t.Fatalf("expected gpu/cpu port collision, got %v", err)
 	}
 }
 

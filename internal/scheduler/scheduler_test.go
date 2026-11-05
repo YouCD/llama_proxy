@@ -76,6 +76,8 @@ func newTestScheduler(t *testing.T, idle time.Duration) *Scheduler {
 				Command:      sleepCommand,
 				ReadinessURL: bgURL,
 				APIKey:       "bg-key",
+				GPU:          "CUDA0", // 声明占卡：coding 切换时被停止（CPU 幸存语义见 scheduler_cpu_test.go）
+				Autostart:    true,    // 启动集成员：代理启动时拉起
 			},
 		},
 	}
@@ -150,10 +152,9 @@ func TestStartBackgroundThenEnsureCoding(t *testing.T) {
 func TestStartBackgroundGroupParallel(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"bg-a": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "key-a", Weight: 2},
-			"bg-b": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "key-b"},
+			"bg-a": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "key-a", Weight: 2, Autostart: true},
+			"bg-b": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "key-b", Autostart: true},
 		},
-		Default: []string{"bg-a", "bg-b"},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 500 * time.Millisecond}
 	s := New(cfg, time.Hour, sw, &http.Client{})
@@ -192,10 +193,9 @@ func TestStartBackgroundGroupParallel(t *testing.T) {
 func TestRestartMemberOnly(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
-			"bg-a": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t))},
-			"bg-b": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t))},
+			"bg-a": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), Autostart: true},
+			"bg-b": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), Autostart: true},
 		},
-		Default: []string{"bg-a", "bg-b"},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 500 * time.Millisecond}
 	s := New(cfg, time.Hour, sw, &http.Client{})

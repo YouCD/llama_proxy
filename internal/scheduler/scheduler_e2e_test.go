@@ -122,9 +122,9 @@ func TestE2ESleepWakeRealServer(t *testing.T) {
 				Command:      cmd,
 				ReadinessURL: url,
 				LogFile:      logFile,
+				Autostart:    true,
 			},
 		},
-		Default: []string{"translator"},
 	}
 	// 真实模型加载较慢，给足启动超时。
 	sw := config.SwitchConfig{DrainTimeout: 5 * time.Second, KillTimeout: 15 * time.Second, StartupTimeout: 240 * time.Second}

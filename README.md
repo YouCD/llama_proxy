@@ -48,7 +48,7 @@ English UI：
 | 请求 model | 去向 |
 |---|---|
 | `llm_prox`（或省略） | 默认轮询模型列表：命中路由规则时进入规则 pool 子池，否则进入全量代理池（`backends.list` + 就绪的本地节点），按权重策略负载均衡 |
-| `scheduling` 条目 key（模型 ID） | 本地调度进程：请求哪个模型 ID 就切换到哪个模型（未就绪时自动拉起并等待；coding 模式续期开发租约，background 模式在 coding 租约仍活跃时进程被占用，返回 503） |
+| `scheduling` 条目 key（模型 ID） | 本地调度进程：请求哪个模型 ID 就加载/切换到哪个模型（未就绪时自动拉起并等待；coding 模式续期开发租约；声明了 `gpu` 的 background 在 coding 租约仍活跃时被占卡，返回 503，纯 CPU background 不受影响） |
 | `backends.list[].model` | 直连部署该模型的后端（单后端，不故障转移） |
 | 未配置的其他模型 ID | 400 错误 |
 
@@ -58,20 +58,20 @@ English UI：
 
 | 条件 | 代理池 |
 |---|---|
-| 当前加载的模型为就绪的 background 模式 | `backends.list` + 本地节点（`local-background`），按权重负载均衡 |
+| 有就绪的 background 启动集成员（coding 态下本地节点全部出池） | `backends.list` + 本地节点（`local-background`），按权重负载均衡 |
 | 当前为 coding 模式 / 本地未就绪 / 进程崩溃 | `backends.list` |
 
 调度细节：
 
-- **模型条目**：`scheduling` 下以模型 ID 为 key（key 即模型 ID，小写生效），每个条目含 `mode`（`coding` 或 `background`）、`command`、`readiness_url`、`api_key`、`log_file`，background 条目另可用 `weight`/`tags`。coding 与 background 条目均可多个。
-- **单进程共享端口**：同一时刻只有一个本地进程在运行。请求某模型 ID 时，代理按该条目 `command` 启动 `llama-server`（先排空在途请求、杀掉旧进程），轮询 `readiness_url` 直到就绪；客户端请求期间代理注入该进程自己的 `api_key`。
-- **coding 模式（按需）**：收到流量才切换；距最后一次 coding 模型流量超过 `scheduling.lease.coding_idle_timeout`（例 30m）后，代理优雅停掉 coding 进程并切回**默认 background**，避免大模型常驻占用显存。
-- **background 模式（常驻）**：启动时加载**默认 background**（仅一个 background 时隐式为它；多个 background 时必须指定 `scheduling.default`）。就绪后以条目 `weight`（缺省 1）作为名为 `local-background` 的动态节点加入代理池参与负载均衡；探测失败或进程意外退出时自动出池，恢复就绪后重新入池。
-- **`resident`（background 可选）**：coding 切换时**保留**该 background 成员（不被杀掉、PID 不变），coding 态下仍可直连；coding 空闲切回 background 组时也不重启它。适合需要与 coding 模型并存于显存、且切换时不想反复加载的大模型。默认 `false`（coding 切换时随 background 组一起停止）。
+- **模型条目**：`scheduling` 下以模型 ID 为 key（key 即模型 ID，小写生效），每个条目含 `mode`（`coding` 或 `background`）、`command`、`readiness_url`、`api_key`、`log_file`，background 条目另可用 `autostart`/`resident`/`no_pool`/`sleep_timeout`/`gpu`/`weight`/`tags`。coding 与 background 条目均可多个。`lease`/`switch` 是保留 key，不得用作模型 ID。
+- **background 模式（启动集 + 按需）**：`autostart: true` 的成员构成**启动集**，代理启动时并行加载（各自独立端口，可各绑一张 GPU）；就绪后以条目 `weight`（缺省 1）作为名为 `local-background` 的动态节点加入代理池参与负载均衡；探测失败或进程意外退出时自动出池，恢复就绪后重新入池。未标 `autostart` 的 background **不随启动加载**，收到其模型 ID 请求时才单独拉起，与运行中的成员并行运行（不打断它们）。
+- **coding 模式（按需）**：收到流量才切换；coding 态下只停**声明了 `gpu` 的** background 成员让显存，未声明 `gpu` 的纯 CPU 成员与 `resident` 成员保留运行；距最后一次 coding 模型流量超过 `scheduling.lease.coding_idle_timeout`（例 30m）后，代理优雅停掉 coding 进程并切回 **background 启动集**，避免大模型常驻占用显存。
+- **`gpu`（background 可选）**：声明该进程占用的 GPU（如 `"CUDA1"`，大小写不敏感），调度器据此做 **per-GPU 独占仲裁**：同一 `gpu` 上的非 `resident` 模型运行时互斥换入——请求其中一方时先把同卡另一方优雅停掉（排空在途、等显存释放）再加载，因此同卡模型**可共用同一端口**；启动集内两个成员不能声明同一 `gpu`；`resident` 模型的 `gpu` 被独占钉死，其他模型声明同卡时配置校验直接报错。未声明 = 纯 CPU（不占显存，不参与仲裁）。
+- **`resident`（background 可选）**：coding 切换时**保留**该 background 成员（不被杀掉、PID 不变），coding 态下仍可直连；coding 空闲切回 background 组时也不重启它。主要用于 GPU 模型显式声明“与 coding 共存”（并因此钉死该卡）。**纯 CPU 模型（未声明 `gpu`）不占显存，coding 切换天然不停它，无需此标记**。适合需要与 coding 模型并存于显存、且切换时不想反复加载的大模型。
 - **`no_pool`（background 可选）**：该模型**不入代理池**（不被 `llm_prox` 默认流量轮询命中），仅当请求体 `model` 恰好是它的模型 ID 时直连。适合翻译 / Embedding / 分类等不应混入通用均衡流量的**专用模型**。与 `resident` 正交：`resident` 决定 coding 切换时是否保留，`no_pool` 决定是否入池。
 - **`sleep_timeout`（background 可选，需配合 `no_pool`）**：该成员**无在途请求**、且距最近一次请求（或首次就绪）超过该时长后，调度器**主动停其进程释放显存**（休眠）；下次请求该模型 ID 时按需重新加载唤醒。`0`（缺省）禁用休眠，成员就绪后永久常驻。**必须同时设 `no_pool`**：休眠判定依赖"全部流量都是按模型 ID 的直连请求"（可被代理层完整观测）；池内成员还会被 `llm_prox` 轮询命中（不经过休眠观测点），闲置判定会失真，故禁止对池内成员配置休眠。休眠成员不出现在代理池、不占显存，组切换也不打扰它；只有直接请求该模型 ID 才会唤醒。
 - **切换**：停旧进程前按 `switch.drain_timeout` 优雅排空在途请求，`kill_timeout` 内未退出则强杀；新进程按 `startup_timeout` 等待就绪。
-- **优先级抢占**：coding > background。background 加载（或空闲切回）期间收到 coding 模型流量时，coding 切换直接抢占在途的 background 切换（取消其就绪等待）并立即开始加载 coding，而不是排队等 background 加载完成——两者共用同一端口，background 本来就要先被杀掉；启动时首次 background 加载被抢占不视为致命错误。反之，coding 租约仍活跃时 background 模型请求被拒（503），不会杀掉正在使用的 coding 进程。
+- **优先级抢占**：coding > background。background 加载（或空闲切回）期间收到 coding 模型流量时，coding 切换直接抢占在途的 background 切换（取消其就绪等待）并立即开始加载 coding，而不是排队等 background 加载完成；启动时首次 background 加载被抢占不视为致命错误。反之，coding 租约仍活跃时，声明了 `gpu` 的非常驻 background 模型请求被拒（503），不会杀掉正在使用的 coding 进程（纯 CPU background 不受影响，照常服务）。
 
 ### 路由规则（routing）
 
@@ -269,46 +269,54 @@ proxy:
     - "/v1/completions"
     - "/v1/embeddings"
 
-# 进程调度（可选）：配置后启用模型 ID 驱动的本地进程切换，未配置则保持纯转发模式。
-# coding/background 的 model（请求该模型 ID 即路由到该进程）与 readiness_url 必填；
-# 所有模型 ID 启动时校验全局唯一，且不与 llm_prox 冲突
+# 进程调度（可选）：配置后启用模型 ID 驱动的本地进程管理，未配置则保持纯转发模式。
+# 条目 key 即模型 ID（小写生效）：请求体 model 为该值即路由到该进程。
+# 配置了 command 的条目 readiness_url 必填；所有模型 ID 启动时校验全局唯一，且不与 llm_prox 冲突。
 scheduling:
-  coding:
+  # coding 模型（按需）：收到流量才加载，空闲租约到期后停掉切回 background 启动集。
+  # coding 与 background 可共用同一端口（coding 运行期间占卡的 background 已停止）。
+  qwen3.8:
+    mode: coding
     # command 支持多行：每个参数一行，拼接为一行命令执行（块内不可用 # 注释）
     command: >
       /usr/local/bin/llama-server
       -m /path/to/coding.gguf
       --host 0.0.0.0 --port 8080 -c 8192
       --alias qwen3.8
-    model: "qwen3.8"                     # 请求体 model 为该值即路由到 coding 进程并续期租约
-    readiness_url: "http://127.0.0.1:8080/v1/models"  # 就绪探测地址（必填，完全按此配置 GET）
+    readiness_url: "http://127.0.0.1:8080/v1/models"  # 就绪探测地址（完全按此配置 GET）
     api_key: "your-api-key"       # 模型进程自身的 API Key（对应 llama-server --api-key）
     log_file: "./data/coding.log" # 可选：该进程 stdout/stderr 日志
-  background:
+  # background 启动集成员：autostart: true，代理启动时并行拉起。
+  qwen3.6:
+    mode: background
     command: >
       /usr/local/bin/llama-server
       -m /path/to/background.gguf
-      --host 0.0.0.0 --port 8080 -c 8192
+      --device CUDA0 --host 0.0.0.0 --port 8080 -c 8192
       --alias qwen3.6
-    model: "qwen3.6"                     # 请求体 model 为该值即路由到本地 background 进程
-    readiness_url: "http://127.0.0.1:8080/v1/models"  # 必填
+    autostart: true                     # 启动集成员：代理启动时拉起；不加则按需加载
+    gpu: "CUDA0"                        # 声明占用的 GPU：调度器据此做同卡互斥换入仲裁
+    readiness_url: "http://127.0.0.1:8080/v1/models"
     api_key: "your-api-key"
     weight: 1   # 就绪后作为动态节点加入代理池的权重，与 backends.list 一起负载均衡，缺省 1
+    tags: ["fast"]
     log_file: "./data/background.log"
-  # 专用翻译模型：不入代理池、闲置休眠。no_pool 使其仅被 model="translator" 的直连请求命中；
-  # sleep_timeout 使其无在途请求且闲置超过 30m 后自动停进程释放显存，下次请求按需唤醒。
+  # 纯 CPU 专用翻译模型：不占显存（未声明 gpu），coding 切换天然不停它，无需 resident；
+  # 不入代理池、闲置休眠。no_pool 使其仅被 model="translator" 的直连请求命中；
+  # sleep_timeout 使其无在途请求且闲置超过 30m 后自动停进程释放内存，下次请求按需唤醒。
   translator:
+    mode: background
     command: >
       /usr/local/bin/llama-server
       -m /path/to/translator.gguf
-      --host 0.0.0.0 --port 8082 -c 8192
-    model: "translator"                # 请求体 model 为该值即直连该进程
-    readiness_url: "http://127.0.0.1:8082/v1/models"  # 必填
-    no_pool: true                      # 不入代理池，仅直连命中
-    sleep_timeout: 30m                 # 闲置 30m 且无在途请求后自动休眠（需配合 no_pool）
+      --device none --host 0.0.0.0 --port 8082 -c 8192
+    autostart: true                      # 启动集成员：代理启动时拉起
+    readiness_url: "http://127.0.0.1:8082/v1/models"
+    no_pool: true                        # 不入代理池，仅直连命中
+    sleep_timeout: 30m                   # 闲置 30m 且无在途请求后自动休眠（需配合 no_pool）
     log_file: "./data/translator.log"
   lease:
-    coding_idle_timeout: 30m  # 距最后一次 coding 流量超过该时长即切回 background
+    coding_idle_timeout: 30m  # 距最后一次 coding 流量超过该时长即切回 background 启动集
   switch:
     drain_timeout: 10s        # 切换前优雅排空在途请求的等待上限
     kill_timeout: 10s         # 停止旧进程的等待上限

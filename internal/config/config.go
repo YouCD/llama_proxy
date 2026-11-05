@@ -169,7 +169,7 @@ func Load(path string) (*YAMLConfig, error) {
 		}
 	}
 
-	// scheduling 子 map 同时包含保留 key（lease/switch/default）与模型条目，
+	// scheduling 子 map 同时包含保留 key（lease/switch）与模型条目，
 	// 主解码只填保留字段，模型条目在此单独解码入 Models。
 	if cfg.Scheduling != nil {
 		if err := decodeSchedulingModels(vp, cfg.Scheduling); err != nil {

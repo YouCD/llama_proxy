@@ -126,9 +126,10 @@
 import { computed } from 'vue'
 import { CopyDocument, View } from '@element-plus/icons-vue'
 import { t } from '../i18n'
+import { fetchRaw } from '../api'
 import {
   fmtNum, fmtRate, fmtPercent, fmtLatency, fmtTokens, shortQuery, shortenBackendUrl,
-  isCompleted as completed, statusClass, latencyTone, rateTone, cacheTone, methodClass,
+  isCompleted as completed, statusClass, latencyTone, rateTone, cacheTone, methodClass, copyText,
 } from '../utils'
 
 const props = defineProps({
@@ -196,13 +197,24 @@ function onClientIPClick(row) {
 function onUserAgentClick(row) {
   if (row.user_agent) emit('select-user-agent', row.user_agent)
 }
+// 复制为 curl：与详情抽屉同一语义——指向代理自身的 origin（原始请求就是发给
+// 代理的），已完成的请求附上原始请求体（--data-raw），便于直接重放。
 async function onCopy(row) {
-  const q = row.query ? `?${row.query}` : ''
+  const method = (row.method || 'GET').toUpperCase()
+  let url = `${window.location.origin}${row.path || ''}`
+  if (row.query) url += `?${row.query}`
+  const esc = (s) => s.replace(/'/g, `'\\''`)
+  const lines = [`curl -X ${method} '${esc(url)}'`, `  -H 'Content-Type: application/json'`]
+  if (completed(row)) {
+    const body = await fetchRaw(row.id, 'request')
+    if (body) lines.push(`  --data-raw '${esc(body)}'`)
+  }
   try {
-    await navigator.clipboard.writeText(`${row.method || ''} ${row.path || ''}${q}`)
-    ElMessage.success(t('copied'))
+    const ok = await copyText(lines.join(' \\\n'))
+    if (ok) ElMessage.success(t('copied'))
+    else ElMessage.warning(t('copyFailed'))
   } catch {
-    /* clipboard unavailable */
+    ElMessage.warning(t('copyFailed'))
   }
 }
 </script>

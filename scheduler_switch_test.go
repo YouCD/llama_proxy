@@ -21,6 +21,7 @@ func newSwitchTestServer(t *testing.T) *Server {
 				Mode:         config.ModeBackground,
 				Command:      "sleep 3600",
 				ReadinessURL: "http://127.0.0.1:1/v1/models",
+				Autostart:    true,
 			},
 			"coding-m": {
 				Mode:         config.ModeCoding,

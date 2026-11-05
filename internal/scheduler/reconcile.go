@@ -210,6 +210,13 @@ func (s *Scheduler) restartMember(ctx context.Context, id string) {
 	}
 	s.mu.Unlock()
 
+	// per-GPU 独占仲裁：唤醒声明了 GPU 的成员时，若同卡已被另一个（按需）
+	// 模型占用，先将其优雅驱逐，避免双模型同卡抢显存。
+	if err := s.acquireGPU(ctx, id); err != nil {
+		log.WithCtx(ctx).Warnf("[scheduler] restart %s blocked by gpu arbitration: %v", id, err)
+		return
+	}
+
 	f, err := openProcessLog(e.LogFile)
 	if err != nil {
 		log.WithCtx(ctx).Warnf("[scheduler] reopen log file %s failed: %v", e.LogFile, err)

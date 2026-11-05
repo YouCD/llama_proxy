@@ -3,6 +3,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -150,6 +151,12 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		return nil
 	}
 	if _, err := s.switchTo(ctx, group, config.ModeBackground); err != nil {
+		// 调用方 ctx 已取消（Ctrl+C 优雅关停）：Shutdown 会杀掉正在加载的成员，
+		// 首次加载被打断不是错误——main.go 对 Start 的任何错误都会 Fatalf，必须放行。
+		if ctx.Err() != nil {
+			log.WithCtx(ctx).Infof("[scheduler] initial background start interrupted by shutdown: %v", err)
+			return nil
+		}
 		// 若首次默认 background 组加载期间有 coding 请求到达并抢占了它，则这不是
 		// 致命错误：coding 切换已在进行，而 main.go 对 Start 的任何错误都会 Fatalf。
 		if s.wasPreempted() {
@@ -242,18 +249,19 @@ func (s *Scheduler) ensureCoding(ctx context.Context, modelID string) (chan stru
 	return ch, err
 }
 
-// ensureBackground 确保 background 组成员进程已就绪：background 组态下成员缺失
-// 触发整组切换、成员已退出立即重启该成员（只重启该成员）；coding 态下租约活跃
-// 时跳过切换（防御性保留：代理层已对此场景返回 503）。
+// ensureBackground 确保 background 模型进程已就绪：default 组成员走常驻路径
+//（background 组态下成员缺失触发整组切换、成员已退出立即重启该成员（只重启该
+// 成员）；coding 态下租约活跃时跳过切换，防御性保留：代理层已对此场景返回 503）；
+// default 组之外的成员走按需路径：不随启动加载，收到请求才单独拉起，与其余运行中
+// 成员并行，不做整组切换。
 func (s *Scheduler) ensureBackground(ctx context.Context, modelID string) (chan struct{}, error) {
 	group := s.cfg.DefaultBackgroundGroup()
-	if len(group) == 0 {
-		return nil, fmt.Errorf("model %q is a background model but no default background group is configured", modelID)
-	}
+	isMember := false
 	for _, id := range group {
 		if id != modelID {
 			continue
 		}
+		isMember = true
 		e := s.cfg.Entry(modelID)
 		s.mu.Lock()
 		coding := s.codingModel != ""
@@ -285,6 +293,10 @@ func (s *Scheduler) ensureBackground(ctx context.Context, modelID string) (chan 
 		}
 		break
 	}
+	if !isMember {
+		// default 组之外的 background：不随启动加载，收到请求才单独拉起。
+		return s.ensureOnDemandBackground(ctx, modelID)
+	}
 
 	s.switchMu.Lock()
 	defer s.switchMu.Unlock()
@@ -301,6 +313,140 @@ func (s *Scheduler) ensureBackground(ctx context.Context, modelID string) (chan 
 	chs, err := s.switchTo(ctx, group, config.ModeBackground)
 	ch := chs[modelID]
 	return ch, err
+}
+
+// ensureOnDemandBackground 确保 default 组之外的 background 模型进程已就绪：
+// 未启动则单独拉起（与其余运行中成员并行，不做整组切换、不停其他进程）；已启动
+// 直接返回其就绪 channel。拉起期间登记为在途 background 切换，可被更高优先级的
+// coding 请求抢占（抢占后 coding 切换的 stopAll 会杀掉刚启动的进程，本次等待收到
+// 取消错误返回）。启动失败退避策略与组内成员一致。
+func (s *Scheduler) ensureOnDemandBackground(ctx context.Context, modelID string) (chan struct{}, error) {
+	e := s.cfg.Entry(modelID)
+	s.mu.Lock()
+	sl := s.procs[modelID]
+	if sl != nil && sl.running() {
+		ch := sl.readyCh
+		s.mu.Unlock()
+		return ch, nil
+	}
+	// 启动失败退避：模型刚因启动失败/崩溃退出且退避窗口未过时，不重复拉起
+	//（避免必然失败的启动被请求风暴反复触发），直接返回明确错误。
+	if s.backoffActiveLocked(modelID) {
+		nt := s.nextRestartAt[modelID]
+		n := s.failCount[modelID]
+		s.mu.Unlock()
+		return nil, fmt.Errorf("model %q failed to start %d time(s) in a row; retrying at %s",
+			modelID, n, nt.Format(time.RFC3339))
+	}
+	s.mu.Unlock()
+
+	// coding 请求可在拉起期间抢占本次加载（background 优先级低于 coding）。
+	s.preemptLowerPriority(ctx, config.ModeBackground, modelID)
+
+	s.switchMu.Lock()
+	defer s.switchMu.Unlock()
+
+	// 二次检查：等待 switchMu 期间状态可能已变化（如另一请求已拉起本模型）。
+	s.mu.Lock()
+	sl = s.procs[modelID]
+	running := sl != nil && sl.running()
+	s.mu.Unlock()
+	if running {
+		return sl.readyCh, nil
+	}
+
+	// per-GPU 独占仲裁：同卡已有非 resident 模型在跑时先将其优雅驱逐。
+	if err := s.acquireGPU(ctx, modelID); err != nil {
+		return nil, err
+	}
+
+	slot := s.launchSlot(ctx, modelID)
+
+	// 登记在途切换（可被 coding 抢占），等待就绪。
+	switchCtx, switchCancel := context.WithCancel(ctx)
+	s.mu.Lock()
+	s.switchTarget = modelID
+	s.switchMode = config.ModeBackground
+	s.switchCancel = switchCancel
+	s.mu.Unlock()
+	defer func() {
+		switchCancel()
+		s.mu.Lock()
+		s.clearSwitchInflightLocked()
+		s.mu.Unlock()
+	}()
+
+	if err := s.waitReady(switchCtx, modelID, e.ReadinessURL, e.APIKey, s.sw.StartupTimeout, true); err != nil {
+		s.mu.Lock()
+		preempted := s.preempted
+		s.mu.Unlock()
+		if errors.Is(err, context.Canceled) && preempted {
+			log.WithCtx(ctx).Infof("[scheduler] on-demand start of %s preempted by higher-priority request", modelID)
+		} else if errors.Is(err, context.Canceled) {
+			// 调用方 ctx 取消（优雅关停）：与抢占区分，避免日志误报。
+			log.WithCtx(ctx).Infof("[scheduler] on-demand start of %s canceled (shutdown in progress)", modelID)
+		} else {
+			// 进程可能仍在加载（如启动超时）：槽位仍在 procs/expected 中，
+			// reconcile 探活循环就绪后会接管并关闭 readyCh。
+			log.WithCtx(ctx).Warnf("[scheduler] on-demand start of %s failed: %v", modelID, err)
+		}
+		return slot.readyCh, err
+	}
+	s.markSlotReady(modelID)
+	log.WithCtx(ctx).Infof("[scheduler] %s ready (on-demand, outside default group)", modelID)
+	return slot.readyCh, nil
+}
+
+// acquireGPU 在启动模型 id 前做 per-GPU 独占仲裁：id 声明了 gpu 且同卡上已有
+// 另一个模型 O 在运行/加载中时，先把 O 优雅驱逐（排空其在途请求、杀进程、
+// 等显存释放），O 的槽位置为休眠态（reconcile 不自动拉起，避免与新模型互相
+// 复活的崩溃循环），随后调用方继续加载 id。O 为 resident 时拒绝换入——常驻
+// 模型独占该卡显存，杀掉会破坏全程在线契约。未声明 gpu 的模型恒放行。
+// 调用方须持有 switchMu（与整组切换/其他单模型拉起互斥）。
+func (s *Scheduler) acquireGPU(ctx context.Context, id string) error {
+	e := s.cfg.Entry(id)
+	if e == nil || e.GPU == "" {
+		return nil
+	}
+	s.mu.Lock()
+	var owner string
+	var ownerSlot *procSlot
+	for oid, sl := range s.procs {
+		if oid == id || sl == nil || !sl.running() {
+			continue
+		}
+		if oe := s.cfg.Entry(oid); oe != nil && oe.GPU == e.GPU {
+			owner, ownerSlot = oid, sl
+			break
+		}
+	}
+	s.mu.Unlock()
+	if owner == "" {
+		return nil
+	}
+	if oe := s.cfg.Entry(owner); oe.Resident {
+		return fmt.Errorf("gpu %s 被常驻模型 %s 独占（全程在线不可抢占），模型 %s 无法加载", e.GPU, owner, id)
+	}
+	log.WithCtx(ctx).Infof("[scheduler] gpu %s busy with %s: evicting to load %s", e.GPU, owner, id)
+	// 优雅排空 owner 的在途请求（上限 drain_timeout，超时强制停止，同整组切换语义）。
+	if s.sw.DrainTimeout > 0 {
+		deadline := time.Now().Add(s.sw.DrainTimeout)
+		for {
+			s.mu.Lock()
+			n := s.inflight[owner]
+			s.mu.Unlock()
+			if n == 0 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	// 杀前读显存基线：驱动异步回收显存慢于进程退出，等释放完再启动新模型，
+	// 否则大显存模型加载会 OOM 崩溃循环。
+	gpuBaseline := gpuBaselineTotal()
+	s.suspendSlot(ctx, owner, ownerSlot)
+	s.waitForGPURelease(ctx, gpuBaseline, 60*time.Second)
+	return nil
 }
 
 // TouchCoding 刷新开发租约时间。每次收到 coding 模式模型流量都应调用。

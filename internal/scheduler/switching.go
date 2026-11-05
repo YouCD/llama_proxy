@@ -69,33 +69,8 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 			s.mu.Unlock()
 			continue
 		}
-		f, err := openProcessLog(entry.LogFile)
-		if err != nil {
-			log.WithCtx(ctx).Warnf("[scheduler] open log file %s failed: %v", entry.LogFile, err)
-		}
-		slot := &procSlot{port: readinessPort(entry), readyCh: make(chan struct{})}
+		slot := s.launchSlot(ctx, id)
 		chs[id] = slot.readyCh
-		if entry.Command != "" {
-			// 启动前确认端口无残留监听者（如上一次代理进程遗留的 setsid 服务），
-			// 否则新服务绑定端口会失败、启动超时卡死切换。
-			s.freeOccupiedPort(ctx, slot.port, s.sw.KillTimeout)
-			cmd := exec.Command("/bin/sh", "-c", entry.Command)
-			if f != nil {
-				cmd.Stdout = f
-				cmd.Stderr = f
-			}
-			if err := cmd.Start(); err != nil {
-				log.WithCtx(ctx).Warnf("[scheduler] start %s command failed: %v", id, err)
-			} else {
-				slot.cmd = cmd
-				log.WithCtx(ctx).Infof("[scheduler] %s process started pid=%d log=%v", id, cmd.Process.Pid, f != nil)
-				go s.reap(id, cmd)
-			}
-		}
-		s.mu.Lock()
-		s.procs[id] = slot
-		s.expected[id] = true
-		s.mu.Unlock()
 		toWait = append(toWait, id)
 	}
 
@@ -150,7 +125,13 @@ func (s *Scheduler) switchTo(ctx context.Context, ids []string, mode string) (ma
 			s.markSlotReady(r.id)
 		} else if firstErr == nil {
 			errID = r.id
-			if errors.Is(r.err, context.Canceled) {
+			// 取消分类依据 s.preempted（在错误分类时读取，抢占可能发生在就绪等待
+			// 期间）：被更高优先级切换真正抢占才叫"被抢占"；调用方 ctx 被取消
+			// （如 Ctrl+C 优雅关停）时 waitReady 同样返回 context.Canceled，不能误报。
+			s.mu.Lock()
+			preempted := s.preempted
+			s.mu.Unlock()
+			if errors.Is(r.err, context.Canceled) && preempted {
 				firstErr = fmt.Errorf("%s switch preempted by higher-priority request", r.id)
 			} else {
 				firstErr = fmt.Errorf("%s ready probe failed: %w", r.id, r.err)
@@ -216,6 +197,51 @@ func describeTarget(mode string, ids []string) string {
 		return ids[0]
 	}
 	return "group"
+}
+
+// launchSlot 启动单个模型进程并登记槽位（procs/expected），返回槽位：打开日志、
+// 创建槽位、清理端口残留监听者、启动包装命令并派生回收协程。调用方须持有
+// switchMu（与整组切换互斥）；已在运行/休眠的槽位由调用方先行判断处理。
+// 组内整组加载（switchTo）与 default 组外按需拉起（ensureOnDemandBackground）共用。
+func (s *Scheduler) launchSlot(ctx context.Context, id string) *procSlot {
+	e := s.cfg.Entry(id)
+	slot := &procSlot{readyCh: make(chan struct{})}
+	if e == nil {
+		// 无配置条目（测试桩）：空槽位，直接交由探活探测。
+		s.mu.Lock()
+		s.procs[id] = slot
+		s.expected[id] = true
+		s.mu.Unlock()
+		return slot
+	}
+	slot.port = readinessPort(e)
+	f, err := openProcessLog(e.LogFile)
+	if err != nil {
+		log.WithCtx(ctx).Warnf("[scheduler] open log file %s failed: %v", e.LogFile, err)
+	}
+	slot.logFile = f
+	if e.Command != "" {
+		// 启动前确认端口无残留监听者（如上一次代理进程遗留的 setsid 服务），
+		// 否则新服务绑定端口会失败、启动超时卡死切换。
+		s.freeOccupiedPort(ctx, slot.port, s.sw.KillTimeout)
+		cmd := exec.Command("/bin/sh", "-c", e.Command)
+		if f != nil {
+			cmd.Stdout = f
+			cmd.Stderr = f
+		}
+		if err := cmd.Start(); err != nil {
+			log.WithCtx(ctx).Warnf("[scheduler] start %s command failed: %v", id, err)
+		} else {
+			slot.cmd = cmd
+			log.WithCtx(ctx).Infof("[scheduler] %s process started pid=%d log=%v", id, cmd.Process.Pid, f != nil)
+			go s.reap(id, cmd)
+		}
+	}
+	s.mu.Lock()
+	s.procs[id] = slot
+	s.expected[id] = true
+	s.mu.Unlock()
+	return slot
 }
 
 // switchPriority 返回切换模式的抢占优先级：coding > background。

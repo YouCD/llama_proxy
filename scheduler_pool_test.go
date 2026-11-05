@@ -121,7 +121,7 @@ func TestHandleProxySchedulerPool(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
 			"qwen3.8": {Mode: config.ModeCoding, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "coding-key"},
-			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "bg-key", Weight: 2},
+			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "bg-key", Weight: 2, Autostart: true},
 		},
 	}
 	staticBackends := []config.BackendConfig{
@@ -171,7 +171,7 @@ func TestHandleProxySchedulerCodingPool(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
 			"qwen3.8": {Mode: config.ModeCoding, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "coding-key"},
-			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "bg-key"},
+			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "bg-key", Autostart: true},
 		},
 	}
 	staticBackends := []config.BackendConfig{
@@ -238,7 +238,7 @@ func TestHandleProxySchedulerKeyIsolation(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
 			"qwen3.8": {Mode: config.ModeCoding, Command: "sleep 3600", ReadinessURL: backend.URL, APIKey: "coding-key"},
-			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: backend.URL, APIKey: "bg-key"},
+			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: backend.URL, APIKey: "bg-key", Autostart: true},
 		},
 	}
 	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: time.Second}
@@ -326,7 +326,7 @@ func TestHandleProxySchedulerGoClawBackground(t *testing.T) {
 	cfg := &config.SchedulingConfig{
 		Models: map[string]config.ProcessConfig{
 			"qwen3.8": {Mode: config.ModeCoding, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "coding-key"},
-			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "bg-key", Weight: 1, Tags: []string{"tool_call"}},
+			"qwen3.6": {Mode: config.ModeBackground, Command: "sleep 3600", ReadinessURL: local.URL, APIKey: "bg-key", Weight: 1, Tags: []string{"tool_call"}, Autostart: true},
 		},
 	}
 	staticBackends := []config.BackendConfig{

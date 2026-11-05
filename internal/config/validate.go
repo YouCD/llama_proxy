@@ -47,6 +47,9 @@ func (c *YAMLConfig) ValidateModelIDs() error {
 // ValidatePortCollisions 校验本地监听端口不冲突（从 readiness_url 推导 origin）。
 // 冲突判定只约束“同时运行”的进程：
 //   - background 组成员并行常驻：成员之间、与 backends.list 之间不得同 origin；
+//   - 同 gpu 的非 resident 模型运行时互斥换入（acquireGPU 保证同卡永不并行）：
+//     可共用同一端口（换入时先杀旧监听者，即换入流程本身）；但任一方为 resident
+//     时两者共存，仍不得同 origin；
 //   - coding 模型互斥运行（同一时刻只有一个 coding 进程，且 background 组已停止）：
 //     coding 条目之间可共用同一端口（如多个 coding 模型都监听 8000），但任一
 //     coding 条目不得与 backends.list 同 origin（coding 运行时后端仍在服务）；
@@ -63,18 +66,15 @@ func (c *YAMLConfig) ValidatePortCollisions() error {
 		}
 		return u.Scheme + "://" + u.Host
 	}
-	type seenMap map[string]string
-	check := func(seen seenMap, origin, where string) error {
-		if origin == "" {
-			return nil
-		}
-		if prev, dup := seen[origin]; dup {
-			return fmt.Errorf("监听端口冲突：%s 与 %s 都使用 %s（同时运行的进程争抢同一监听端口）", prev, where, origin)
-		}
-		seen[origin] = where
-		return nil
+	// origin 占用状态：gpu 非空表示该端口由该 GPU 上的互斥换入组占用（同卡非
+	// resident 模型可共用）；resident 为真表示占用者含常驻模型（与任何同端口
+	// 模型共存，后续同 origin 一律冲突）。
+	type originClaim struct {
+		gpu      string
+		resident bool
+		where    string
 	}
-	bgSeen := seenMap{}
+	bgSeen := make(map[string]originClaim)
 	codeOrigins := make(map[string]string) // origin -> 首个使用该 origin 的 coding 条目
 	for id, e := range c.Scheduling.Models {
 		origin := originOf(e.ReadinessURL)
@@ -87,16 +87,28 @@ func (c *YAMLConfig) ValidatePortCollisions() error {
 			}
 			continue
 		}
-		if err := check(bgSeen, origin, where); err != nil {
-			return err
+		if origin == "" {
+			continue
 		}
+		claim, taken := bgSeen[origin]
+		if !taken {
+			bgSeen[origin] = originClaim{gpu: e.GPU, resident: e.Resident, where: where}
+			continue
+		}
+		if e.GPU != "" && e.GPU == claim.gpu && !claim.resident && !e.Resident {
+			// 同卡互斥换入组：运行时永不并行，可共用端口。
+			continue
+		}
+		return fmt.Errorf("监听端口冲突：%s 与 %s 都使用 %s（同时运行的进程争抢同一监听端口）", claim.where, where, origin)
 	}
 	for i := range c.Backends.List {
 		b := &c.Backends.List[i]
 		origin := originOf(b.URL)
 		where := "backends.list[" + b.Name + "]"
-		if err := check(bgSeen, origin, where); err != nil {
-			return err
+		if origin != "" {
+			if claim, dup := bgSeen[origin]; dup {
+				return fmt.Errorf("监听端口冲突：%s 与 %s 都使用 %s（同时运行的进程争抢同一监听端口）", claim.where, where, origin)
+			}
 		}
 		if prev, dup := codeOrigins[origin]; dup {
 			return fmt.Errorf("监听端口冲突：%s 与 %s 都使用 %s（coding 模型与 backends.list 后端同时运行，争抢同一监听端口）", prev, where, origin)
