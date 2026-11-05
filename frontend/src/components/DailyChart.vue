@@ -14,8 +14,6 @@
         <div ref="requestsEl" class="chart-box"></div>
       </div>
     </div>
-    <!-- 三图共用的时间范围滑块（底部 range selector，Grafana 式） -->
-    <div ref="rangeEl" class="range-slider"></div>
   </div>
 </template>
 
@@ -28,6 +26,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { t } from '../i18n'
 import { fmtCompact } from '../utils'
 import { currentTheme } from '../theme'
+import { attachDragZoom } from '../dragZoom'
 
 echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, CanvasRenderer])
 
@@ -41,11 +40,10 @@ const emit = defineEmits(['rangechange'])
 const tokenEl = ref(null)
 const statusEl = ref(null)
 const requestsEl = ref(null)
-const rangeEl = ref(null)
 let tokenChart = null
 let statusChart = null
 let requestsChart = null
-let rangeChart = null
+let dragZoomCleanups = []
 
 const DATE_COLORS = {
   prompt: '#3b82f6',
@@ -60,12 +58,15 @@ const statusColor = (v) => {
   return '#ef4444'
 }
 
-// 每张主图：滚轮缩放（inside）；底部共用滑块见 renderRange
+// 每张主图：滚轮缩放（inside dataZoom）+ 拖拽框选缩放（src/dragZoom.js 实现，
+// 因 ECharts 6 的 dataZoom.select 是 toolbox 专用组件、未进公共导出）。
+// 注：moveOnMouseMove 默认 true（拖拽会平移缩放窗口），与拖拽框选冲突，
+// 故显式置 false —— 拖拽专用于框选缩放（平移不提供，缩放/重置用滚轮与双击）。
 function dataZooms() {
-  return [{ type: 'inside', xAxisIndex: 0, zoomOnMouseWheel: true }]
+  return [{ type: 'inside', xAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseMove: false }]
 }
 
-// 加载动画：三图 + 滑块错峰入场（0/150/300/450ms），数据更新时平滑过渡且不额外延迟
+// 加载动画：三图错峰入场（0/150/300ms），数据更新时平滑过渡且不额外延迟
 function animOpts(delay = 0) {
   return {
     animation: true,
@@ -101,14 +102,13 @@ function render() {
   renderToken(dates, items, labels)
   renderStatus(dates, items, labels)
   renderRequests(dates, items, labels)
-  renderRange(dates, items, labels)
 }
 
 function renderToken(dates, items, labels) {
   if (!tokenChart) return
   tokenChart.setOption({
     ...animOpts(0),
-    tooltip: { trigger: 'axis', valueFormatter: (v) => fmtCompact(v) },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'line' }, valueFormatter: (v) => fmtCompact(v) },
     legend: {
       data: [labels.promptTokens, labels.cachedTokens, labels.completionTokens, labels.totalTokens],
       bottom: 0,
@@ -175,7 +175,7 @@ function renderStatus(dates, items, labels) {
   if (!statusChart) return
   statusChart.setOption({
     ...animOpts(150),
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'line' } },
     legend: {
       data: [labels.ok, labels.err4xx, labels.err5xx],
       bottom: 0,
@@ -228,7 +228,7 @@ function renderRequests(dates, items, labels) {
   if (!requestsChart) return
   requestsChart.setOption({
     ...animOpts(300),
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'line' } },
     grid: { left: 10, right: 10, top: 20, bottom: 30, containLabel: true },
     dataZoom: dataZooms(),
     xAxis: {
@@ -256,61 +256,24 @@ function renderRequests(dates, items, labels) {
   })
 }
 
-// 底部共用时间范围滑块：三图同步控制（Grafana 底部 range selector 风格），
-// 滑块自带数据缩略背景，拖动手柄/选区会触发 datazoom 事件同步三张主图
-function renderRange(dates, items, labels) {
-  if (!rangeChart) return
-  rangeChart.setOption({
-    ...animOpts(450),
-    grid: { left: 10, right: 10, top: 4, bottom: 4, containLabel: false },
-    dataZoom: [
-      {
-        type: 'slider',
-        xAxisIndex: 0,
-        start: 0,
-        end: 100,
-        top: 8,
-        height: 30,
-        borderColor: 'transparent',
-        backgroundColor: 'rgba(100, 116, 139, 0.06)',
-        fillerColor: 'rgba(59, 130, 246, 0.18)',
-        dataBackground: {
-          lineStyle: { color: 'rgba(100, 116, 139, 0.6)' },
-          areaStyle: { color: 'rgba(100, 116, 139, 0.15)' },
-        },
-        handleStyle: { color: '#3b82f6', borderColor: '#3b82f6' },
-        moveHandleStyle: { color: 'rgba(59, 130, 246, 0.4)' },
-        textStyle: { color: textColor() },
-        labelFormatter: (val) => dates[Math.round(val)] ?? '',
-      },
-    ],
-    xAxis: { type: 'category', data: dates, boundaryGap: true, show: false },
-    yAxis: { type: 'value', show: false },
-    series: [
-      {
-        name: labels.totalTokens,
-        type: 'line',
-        data: items.map((d) => d.total_tokens || 0),
-        smooth: true,
-        showSymbol: false,
-        lineStyle: { width: 1, color: 'rgba(100, 116, 139, 0.7)' },
-        itemStyle: { color: 'rgba(100, 116, 139, 0.7)' },
-        areaStyle: { color: 'rgba(100, 116, 139, 0.12)' },
-      },
-    ],
-  })
-}
-
 function resizeAll() {
   tokenChart?.resize()
   statusChart?.resize()
   requestsChart?.resize()
-  rangeChart?.resize()
 }
 
 let syncingZoom = false
 let silentZoom = false
 let lastRangeKey = ''
+
+// 把所有图表的 dataZoom 统一写到 [startIdx, endIdx]（含源图）。
+// 每张图只有一个 inside dataZoom 实例，显式写全部图表保证任意入口
+// （滚轮 / 拖拽框选 / 双击）后窗口一致。
+function applyZoomToAll(startIdx, endIdx) {
+  for (const chart of [tokenChart, statusChart, requestsChart]) {
+    chart?.dispatchAction({ type: 'dataZoom', dataZoomIndex: 0, startValue: startIdx, endValue: endIdx })
+  }
+}
 
 // 外部重置（如筛选面板“重置”）：恢复全窗口。静默执行，不触发 rangechange 回写筛选，
 // 避免把重置后的默认时间范围（今天）覆盖成全窗口。
@@ -319,17 +282,16 @@ function resetZoom() {
   if (!n) return
   silentZoom = true
   try {
-    for (const chart of [tokenChart, statusChart, requestsChart, rangeChart]) {
-      chart?.dispatchAction({ type: 'dataZoom', startValue: 0, endValue: n - 1 })
-    }
+    applyZoomToAll(0, n - 1)
   } finally {
     silentZoom = false
   }
 }
 defineExpose({ resetZoom })
 
-// 任意图表缩放后：同步另外两张图的窗口，并把选中日期区间转成时间范围向外抛出
-function makeZoomHandler(source) {
+// 任意图表缩放后（滚轮 / 拖拽框选）：统一全部图表的窗口，
+// 并把选中日期区间转成时间范围向外抛出
+function makeZoomHandler() {
   return (e) => {
     if (syncingZoom || silentZoom) return
     const batch = (e.batch && e.batch[0]) || e
@@ -349,10 +311,7 @@ function makeZoomHandler(source) {
     endIdx = Math.max(startIdx, Math.min(endIdx, n - 1))
     syncingZoom = true
     try {
-      for (const chart of [tokenChart, statusChart, requestsChart, rangeChart]) {
-        if (!chart || chart === source) continue
-        chart.dispatchAction({ type: 'dataZoom', startValue: startIdx, endValue: endIdx })
-      }
+      applyZoomToAll(startIdx, endIdx)
     } finally {
       syncingZoom = false
     }
@@ -383,34 +342,37 @@ onMounted(() => {
   tokenChart = echarts.init(tokenEl.value)
   statusChart = echarts.init(statusEl.value)
   requestsChart = echarts.init(requestsEl.value)
-  rangeChart = echarts.init(rangeEl.value)
-  tokenChart.on('datazoom', makeZoomHandler(tokenChart))
-  statusChart.on('datazoom', makeZoomHandler(statusChart))
-  requestsChart.on('datazoom', makeZoomHandler(requestsChart))
-  rangeChart.on('datazoom', makeZoomHandler(rangeChart))
-  // 双击任意图表重置全窗口（经 makeZoomHandler 同步其余图表并抛 rangechange）
+  tokenChart.on('datazoom', makeZoomHandler())
+  statusChart.on('datazoom', makeZoomHandler())
+  requestsChart.on('datazoom', makeZoomHandler())
+  // 双击任意图表重置全窗口（经 makeZoomHandler 统一其余图表与实例并抛 rangechange）
   const onDbl = () => {
     const items = props.items || []
     if (!items.length) return
-    tokenChart.dispatchAction({ type: 'dataZoom', startValue: 0, endValue: items.length - 1 })
+    tokenChart.dispatchAction({ type: 'dataZoom', dataZoomIndex: 0, startValue: 0, endValue: items.length - 1 })
   }
   tokenChart.on('dblclick', onDbl)
   statusChart.on('dblclick', onDbl)
   requestsChart.on('dblclick', onDbl)
+  // 拖拽框选缩放（Grafana 式）：挂在三张主图上，选区带高亮、松手放大时间轴。
+  dragZoomCleanups = [
+    attachDragZoom(tokenChart),
+    attachDragZoom(statusChart),
+    attachDragZoom(requestsChart),
+  ]
   window.addEventListener('resize', resizeAll)
   render()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', resizeAll)
+  for (const cleanup of dragZoomCleanups) cleanup()
   tokenChart?.dispose()
   statusChart?.dispose()
   requestsChart?.dispose()
-  rangeChart?.dispose()
   tokenChart = null
   statusChart = null
   requestsChart = null
-  rangeChart = null
 })
 </script>
 
@@ -429,13 +391,6 @@ onBeforeUnmount(() => {
   .charts-grid {
     grid-template-columns: 1fr;
   }
-}
-
-/* 三图共用的底部时间范围滑块 */
-.range-slider {
-  width: 100%;
-  height: 48px;
-  margin-top: 12px;
 }
 
 .chart-section {

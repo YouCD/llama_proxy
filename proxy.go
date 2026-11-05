@@ -38,8 +38,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	requestID := httpx.NewID()
 	clientIP := httpx.ClientIP(r)
-	// 创建带 request_id 的请求上下文，日志可按 request_id 串联整个请求生命周期。
-	ctx := s.newInflightCtx(r.Context(), requestID)
+	// 创建带 request_id 的可取消请求上下文：日志按 request_id 串联整个请求生命周期；
+	// 优雅起停时 cancelAllProxy 取消它，立即打断上游连接与流式拷贝，Shutdown 不必傻等。
+	ctx, cancelProxy := s.newProxyCtx(r.Context(), requestID)
+	defer cancelProxy()
 
 	if cfg.MaxRequestBytes > 0 && r.ContentLength > cfg.MaxRequestBytes {
 		httpx.WriteJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "request is too large"})

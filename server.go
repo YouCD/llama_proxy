@@ -42,6 +42,10 @@ type Server struct {
 
 	sseMu       sync.Mutex
 	sseCancels  map[context.Context]context.CancelFunc
+	// proxyMu/proxyCancels 跟踪在途代理请求的可取消上下文，
+	// 优雅起停时 cancelAllProxy 立即打断 LLM 长流，避免 Shutdown 傻等请求完成。
+	proxyMu      sync.Mutex
+	proxyCancels map[context.Context]context.CancelFunc
 	schedMu     sync.RWMutex
 	schedEvents []map[string]any
 
@@ -71,6 +75,42 @@ func (s *Server) applyConfig(cfg config.Config, yamlCfg *config.YAMLConfig, stat
 // 以便一个请求从接收到结束的所有日志能按 request_id 串联。
 func (s *Server) newInflightCtx(parent context.Context, requestID string) context.Context {
 	return context.WithValue(parent, "request_id", requestID)
+}
+
+// newProxyCtx 返回在途代理请求的可取消上下文（带 request_id），供日志串联。
+// 上游请求用 http.NewRequestWithContext 派生自它，取消即断开上游连接、
+// 打断进行中的流式拷贝，handler 随即返回，Shutdown 不必等请求自然结束。
+func (s *Server) newProxyCtx(parent context.Context, requestID string) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(s.newInflightCtx(parent, requestID))
+	s.proxyMu.Lock()
+	if s.proxyCancels == nil {
+		s.proxyCancels = make(map[context.Context]context.CancelFunc)
+	}
+	s.proxyCancels[ctx] = cancel
+	s.proxyMu.Unlock()
+
+	return ctx, func() {
+		cancel()
+		s.proxyMu.Lock()
+		delete(s.proxyCancels, ctx)
+		s.proxyMu.Unlock()
+	}
+}
+
+// cancelAllProxy 取消所有在途代理请求，用于优雅起停：
+// 收到信号时打断进行中的 LLM 流式生成等长请求，handler 立即返回，
+// server.Shutdown 毫秒级完成，不再傻等到超时。
+func (s *Server) cancelAllProxy() {
+	s.proxyMu.Lock()
+	cancels := make([]context.CancelFunc, 0, len(s.proxyCancels))
+	for _, c := range s.proxyCancels {
+		cancels = append(cancels, c)
+	}
+	s.proxyMu.Unlock()
+
+	for _, c := range cancels {
+		c()
+	}
 }
 
 // newSSECtx 为 SSE 长连接创建可统一取消的上下文，优雅起停时能立即断开监控连接。

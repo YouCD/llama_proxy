@@ -174,8 +174,10 @@ func main() {
 	log.WithCtx(ctx).Infof("llama_proxy listening on %s, backends=%d", cfg.ListenAddr, backendCount)
 
 	server := &http.Server{Addr: cfg.ListenAddr, Handler: s}
-	// 优雅起停时先断开 SSE 长连接，避免 Shutdown 傻等监控页面连接直到超时。
+	// 优雅起停时先断开 SSE 长连接并打断在途代理请求（LLM 长流），
+	// 避免 Shutdown 傻等监控页面连接 / 在途请求直到超时。
 	server.RegisterOnShutdown(s.cancelAllSSE)
+	server.RegisterOnShutdown(s.cancelAllProxy)
 	serverErr := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -190,8 +192,8 @@ func main() {
 			log.WithCtx(ctx).Fatalf("server failed: %v", err)
 		}
 	case <-ctx.Done():
-		// 收到退出信号：停止接收新连接并排空在途请求。
-		log.WithCtx(ctx).Infof("shutdown signal received, draining in-flight requests")
+		// 收到退出信号：打断在途请求与 SSE 长连接，停止接收新连接，handler 立即返回。
+		log.WithCtx(ctx).Infof("shutdown signal received, cancelling in-flight requests and SSE connections")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer shutdownCancel()
 		if err := server.Shutdown(shutdownCtx); err != nil {
