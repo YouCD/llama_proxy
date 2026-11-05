@@ -1,17 +1,21 @@
 <template>
   <div class="daily-chart">
-    <div class="chart-section">
-      <h3 class="chart-title">{{ t('dailyTokenTitle') }}</h3>
-      <div ref="tokenEl" class="chart-box"></div>
+    <div class="charts-grid">
+      <div class="chart-section">
+        <h3 class="chart-title">{{ mode === 'minute' ? t('minuteTokenTitle') : t('dailyTokenTitle') }}</h3>
+        <div ref="tokenEl" class="chart-box"></div>
+      </div>
+      <div class="chart-section">
+        <h3 class="chart-title">{{ mode === 'minute' ? t('minuteStatusTitle') : t('dailyStatusTitle') }}</h3>
+        <div ref="statusEl" class="chart-box"></div>
+      </div>
+      <div class="chart-section">
+        <h3 class="chart-title">{{ mode === 'minute' ? t('minuteRequestsTitle') : t('dailyRequestsTitle') }}</h3>
+        <div ref="requestsEl" class="chart-box"></div>
+      </div>
     </div>
-    <div class="chart-section">
-      <h3 class="chart-title">{{ t('dailyStatusTitle') }}</h3>
-      <div ref="statusEl" class="chart-box"></div>
-    </div>
-    <div class="chart-section">
-      <h3 class="chart-title">{{ t('dailyRequestsTitle') }}</h3>
-      <div ref="requestsEl" class="chart-box"></div>
-    </div>
+    <!-- 三图共用的时间范围滑块（底部 range selector，Grafana 式） -->
+    <div ref="rangeEl" class="range-slider"></div>
   </div>
 </template>
 
@@ -19,24 +23,29 @@
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import * as echarts from 'echarts/core'
 import { LineChart, BarChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
+import { GridComponent, TooltipComponent, LegendComponent, DataZoomComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { t } from '../i18n'
 import { fmtCompact } from '../utils'
 import { currentTheme } from '../theme'
 
-echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
+echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, CanvasRenderer])
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
+  // 'day'：按天聚合（item.date）；'minute'：按分钟聚合（item.minute，'YYYY-MM-DD HH:MM'）
+  mode: { type: String, default: 'day' },
 })
+const emit = defineEmits(['rangechange'])
 
 const tokenEl = ref(null)
 const statusEl = ref(null)
 const requestsEl = ref(null)
+const rangeEl = ref(null)
 let tokenChart = null
 let statusChart = null
 let requestsChart = null
+let rangeChart = null
 
 const DATE_COLORS = {
   prompt: '#3b82f6',
@@ -51,6 +60,24 @@ const statusColor = (v) => {
   return '#ef4444'
 }
 
+// 每张主图：滚轮缩放（inside）；底部共用滑块见 renderRange
+function dataZooms() {
+  return [{ type: 'inside', xAxisIndex: 0, zoomOnMouseWheel: true }]
+}
+
+// 加载动画：三图 + 滑块错峰入场（0/150/300/450ms），数据更新时平滑过渡且不额外延迟
+function animOpts(delay = 0) {
+  return {
+    animation: true,
+    animationDuration: 900,
+    animationEasing: 'cubicOut',
+    animationDelay: delay,
+    animationDurationUpdate: 500,
+    animationEasingUpdate: 'cubicInOut',
+    animationDelayUpdate: 0,
+  }
+}
+
 // 轴/图例文字与网格线颜色跟随主题（深/浅）
 function textColor() {
   return currentTheme.value === 'dark' ? '#94a3b8' : '#6b7280'
@@ -59,7 +86,7 @@ const GRID_LINE = 'rgba(100, 116, 139, 0.2)'
 
 function render() {
   const items = props.items || []
-  const dates = items.map((d) => d.date || '')
+  const dates = items.map((d) => (props.mode === 'minute' ? (d.minute || '').slice(11) : d.date || ''))
   const labels = {
     totalTokens: t('chartTotalTokens'),
     promptTokens: t('chartPromptTokens'),
@@ -74,11 +101,13 @@ function render() {
   renderToken(dates, items, labels)
   renderStatus(dates, items, labels)
   renderRequests(dates, items, labels)
+  renderRange(dates, items, labels)
 }
 
 function renderToken(dates, items, labels) {
   if (!tokenChart) return
   tokenChart.setOption({
+    ...animOpts(0),
     tooltip: { trigger: 'axis', valueFormatter: (v) => fmtCompact(v) },
     legend: {
       data: [labels.promptTokens, labels.cachedTokens, labels.completionTokens, labels.totalTokens],
@@ -89,6 +118,7 @@ function renderToken(dates, items, labels) {
       textStyle: { color: textColor(), fontSize: 11 },
     },
     grid: { left: 10, right: 10, top: 20, bottom: 30, containLabel: true },
+    dataZoom: dataZooms(),
     xAxis: {
       type: 'category',
       data: dates,
@@ -144,6 +174,7 @@ function renderToken(dates, items, labels) {
 function renderStatus(dates, items, labels) {
   if (!statusChart) return
   statusChart.setOption({
+    ...animOpts(150),
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     legend: {
       data: [labels.ok, labels.err4xx, labels.err5xx],
@@ -153,6 +184,7 @@ function renderStatus(dates, items, labels) {
       textStyle: { color: textColor() },
     },
     grid: { left: 10, right: 10, top: 20, bottom: 30, containLabel: true },
+    dataZoom: dataZooms(),
     xAxis: {
       type: 'category',
       data: dates,
@@ -195,8 +227,10 @@ function renderStatus(dates, items, labels) {
 function renderRequests(dates, items, labels) {
   if (!requestsChart) return
   requestsChart.setOption({
+    ...animOpts(300),
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
     grid: { left: 10, right: 10, top: 20, bottom: 30, containLabel: true },
+    dataZoom: dataZooms(),
     xAxis: {
       type: 'category',
       data: dates,
@@ -222,10 +256,124 @@ function renderRequests(dates, items, labels) {
   })
 }
 
+// 底部共用时间范围滑块：三图同步控制（Grafana 底部 range selector 风格），
+// 滑块自带数据缩略背景，拖动手柄/选区会触发 datazoom 事件同步三张主图
+function renderRange(dates, items, labels) {
+  if (!rangeChart) return
+  rangeChart.setOption({
+    ...animOpts(450),
+    grid: { left: 10, right: 10, top: 4, bottom: 4, containLabel: false },
+    dataZoom: [
+      {
+        type: 'slider',
+        xAxisIndex: 0,
+        start: 0,
+        end: 100,
+        top: 8,
+        height: 30,
+        borderColor: 'transparent',
+        backgroundColor: 'rgba(100, 116, 139, 0.06)',
+        fillerColor: 'rgba(59, 130, 246, 0.18)',
+        dataBackground: {
+          lineStyle: { color: 'rgba(100, 116, 139, 0.6)' },
+          areaStyle: { color: 'rgba(100, 116, 139, 0.15)' },
+        },
+        handleStyle: { color: '#3b82f6', borderColor: '#3b82f6' },
+        moveHandleStyle: { color: 'rgba(59, 130, 246, 0.4)' },
+        textStyle: { color: textColor() },
+        labelFormatter: (val) => dates[Math.round(val)] ?? '',
+      },
+    ],
+    xAxis: { type: 'category', data: dates, boundaryGap: true, show: false },
+    yAxis: { type: 'value', show: false },
+    series: [
+      {
+        name: labels.totalTokens,
+        type: 'line',
+        data: items.map((d) => d.total_tokens || 0),
+        smooth: true,
+        showSymbol: false,
+        lineStyle: { width: 1, color: 'rgba(100, 116, 139, 0.7)' },
+        itemStyle: { color: 'rgba(100, 116, 139, 0.7)' },
+        areaStyle: { color: 'rgba(100, 116, 139, 0.12)' },
+      },
+    ],
+  })
+}
+
 function resizeAll() {
   tokenChart?.resize()
   statusChart?.resize()
   requestsChart?.resize()
+  rangeChart?.resize()
+}
+
+let syncingZoom = false
+let silentZoom = false
+let lastRangeKey = ''
+
+// 外部重置（如筛选面板“重置”）：恢复全窗口。静默执行，不触发 rangechange 回写筛选，
+// 避免把重置后的默认时间范围（今天）覆盖成全窗口。
+function resetZoom() {
+  const n = (props.items || []).length
+  if (!n) return
+  silentZoom = true
+  try {
+    for (const chart of [tokenChart, statusChart, requestsChart, rangeChart]) {
+      chart?.dispatchAction({ type: 'dataZoom', startValue: 0, endValue: n - 1 })
+    }
+  } finally {
+    silentZoom = false
+  }
+}
+defineExpose({ resetZoom })
+
+// 任意图表缩放后：同步另外两张图的窗口，并把选中日期区间转成时间范围向外抛出
+function makeZoomHandler(source) {
+  return (e) => {
+    if (syncingZoom || silentZoom) return
+    const batch = (e.batch && e.batch[0]) || e
+    const items = props.items || []
+    const n = items.length
+    if (!n) return
+    let startIdx
+    let endIdx
+    if (typeof batch.startValue === 'number' && typeof batch.endValue === 'number') {
+      startIdx = batch.startValue
+      endIdx = batch.endValue
+    } else {
+      startIdx = Math.round(((batch.start ?? 0) / 100) * (n - 1))
+      endIdx = Math.round(((batch.end ?? 100) / 100) * (n - 1))
+    }
+    startIdx = Math.max(0, Math.min(startIdx, n - 1))
+    endIdx = Math.max(startIdx, Math.min(endIdx, n - 1))
+    syncingZoom = true
+    try {
+      for (const chart of [tokenChart, statusChart, requestsChart, rangeChart]) {
+        if (!chart || chart === source) continue
+        chart.dispatchAction({ type: 'dataZoom', startValue: startIdx, endValue: endIdx })
+      }
+    } finally {
+      syncingZoom = false
+    }
+    const fromDate = items[startIdx] && (props.mode === 'minute' ? items[startIdx].minute : items[startIdx].date)
+    const toDate = items[endIdx] && (props.mode === 'minute' ? items[endIdx].minute : items[endIdx].date)
+    if (!fromDate || !toDate) return
+    let from
+    let to
+    if (props.mode === 'minute') {
+      // 分钟桶：'YYYY-MM-DD HH:MM' → 本地时间该分钟起点 ~ 该分钟 59.999s
+      from = new Date(new Date(fromDate.replace(' ', 'T')).getTime()).toISOString()
+      to = new Date(new Date(toDate.replace(' ', 'T')).getTime() + 59999).toISOString()
+    } else {
+      from = new Date(`${fromDate}T00:00:00`).toISOString()
+      to = new Date(`${toDate}T23:59:59.999`).toISOString()
+    }
+    const key = `${from}|${to}`
+    if (key === lastRangeKey) return
+    lastRangeKey = key
+    emit('rangechange', { from, to })
+  }
 }
 
 watch(() => props.items, render, { deep: true })
@@ -235,6 +383,20 @@ onMounted(() => {
   tokenChart = echarts.init(tokenEl.value)
   statusChart = echarts.init(statusEl.value)
   requestsChart = echarts.init(requestsEl.value)
+  rangeChart = echarts.init(rangeEl.value)
+  tokenChart.on('datazoom', makeZoomHandler(tokenChart))
+  statusChart.on('datazoom', makeZoomHandler(statusChart))
+  requestsChart.on('datazoom', makeZoomHandler(requestsChart))
+  rangeChart.on('datazoom', makeZoomHandler(rangeChart))
+  // 双击任意图表重置全窗口（经 makeZoomHandler 同步其余图表并抛 rangechange）
+  const onDbl = () => {
+    const items = props.items || []
+    if (!items.length) return
+    tokenChart.dispatchAction({ type: 'dataZoom', startValue: 0, endValue: items.length - 1 })
+  }
+  tokenChart.on('dblclick', onDbl)
+  statusChart.on('dblclick', onDbl)
+  requestsChart.on('dblclick', onDbl)
   window.addEventListener('resize', resizeAll)
   render()
 })
@@ -244,24 +406,36 @@ onBeforeUnmount(() => {
   tokenChart?.dispose()
   statusChart?.dispose()
   requestsChart?.dispose()
+  rangeChart?.dispose()
   tokenChart = null
   statusChart = null
   requestsChart = null
+  rangeChart = null
 })
 </script>
 
 <style scoped>
 .daily-chart {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
   margin-top: 4px;
 }
 
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+
 @media (max-width: 900px) {
-  .daily-chart {
+  .charts-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* 三图共用的底部时间范围滑块 */
+.range-slider {
+  width: 100%;
+  height: 48px;
+  margin-top: 12px;
 }
 
 .chart-section {

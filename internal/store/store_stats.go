@@ -312,6 +312,92 @@ func (st *Store) GetDailyStats(days int, f model.RequestFilter) ([]map[string]an
 	return out, nil
 }
 
+// GetMinuteStats 按分钟（+8 时区）聚合请求统计，窗口为最近 minutes 分钟。
+// 窗口内无数据的分钟补零行，保证前端时间轴连续。
+func (st *Store) GetMinuteStats(minutes int, f model.RequestFilter) ([]map[string]any, error) {
+	if minutes <= 0 {
+		minutes = 60
+	}
+	if minutes > 1440 {
+		minutes = 1440
+	}
+
+	// 与 GetDailyStats 同理：存储层为 UTC，按 +8 时区取分钟桶，避免跨时区错位。
+	minuteExpr := `strftime('%Y-%m-%d %H:%M', created_at, '+8 hours')`
+	if st.isPostgres {
+		minuteExpr = `to_char(created_at AT TIME ZONE 'Asia/Shanghai', 'YYYY-MM-DD HH24:MI')`
+	}
+
+	// 窗口：[now 所在分钟 - (minutes-1) 分钟, now]，分钟对齐。
+	loc := time.FixedZone("CST", 8*3600)
+	end := time.Now().UTC().In(loc).Truncate(time.Minute)
+	start := end.Add(-time.Duration(minutes-1) * time.Minute)
+	if f.TimeFrom.IsZero() {
+		f.TimeFrom = start.UTC()
+	}
+	if f.TimeTo.IsZero() {
+		f.TimeTo = time.Now().UTC()
+	}
+
+	query := `SELECT
+		` + minuteExpr + `,
+		COUNT(*),
+		COALESCE(SUM(prompt_tokens),0),
+		COALESCE(SUM(cached_prompt_tokens),0),
+		COALESCE(SUM(completion_tokens),0),
+		COALESCE(SUM(total_tokens),0),
+		COALESCE(SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END),0)
+		FROM requests
+		WHERE 1=1`
+	args := []any{}
+	query, args = appendRequestFilterSQL(query, args, f, st.isPostgres)
+	query += ` GROUP BY ` + minuteExpr + ` ORDER BY ` + minuteExpr + ` ASC`
+
+	rows, err := st.db.Raw(query, args...).Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	buckets := make(map[string][]any, minutes)
+	for rows.Next() {
+		var minute string
+		var count, promptTok, cachedTok, completionTok, totalTok, okCount, err4xx, err5xx int64
+		if err := rows.Scan(&minute, &count, &promptTok, &cachedTok, &completionTok,
+			&totalTok, &okCount, &err4xx, &err5xx); err != nil {
+			return nil, err
+		}
+		buckets[minute] = []any{count, promptTok, cachedTok, completionTok, totalTok, okCount, err4xx, err5xx}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// 补零：窗口内每个分钟桶都要有一行，无数据的分钟输出 0。
+	out := make([]map[string]any, 0, minutes)
+	for i := 0; i < minutes; i++ {
+		key := start.Add(time.Duration(i) * time.Minute).Format("2006-01-02 15:04")
+		vals, ok := buckets[key]
+		if !ok {
+			vals = []any{int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)}
+		}
+		out = append(out, map[string]any{
+			"minute":               key,
+			"total_requests":       vals[0],
+			"prompt_tokens":        vals[1],
+			"cached_prompt_tokens": vals[2],
+			"completion_tokens":    vals[3],
+			"total_tokens":         vals[4],
+			"ok_requests":          vals[5],
+			"err4xx":               vals[6],
+			"err5xx":               vals[7],
+		})
+	}
+	return out, nil
+}
+
 // lifetimeCacheHitPct 计算全生命周期的缓存命中率（百分比）。
 func lifetimeCacheHitPct(prompt, cached int64) float64 {
 	if prompt <= 0 {

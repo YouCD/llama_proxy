@@ -87,7 +87,7 @@ const props = defineProps({
   backends: { type: Array, default: () => [] },
   quickCounts: { type: Object, default: () => ({ ok: 0, err4xx: 0, err5xx: 0, stream: 0 }) },
 })
-const emit = defineEmits(['apply'])
+const emit = defineEmits(['apply', 'reset'])
 
 const f = reactive({
   path: '',
@@ -172,6 +172,7 @@ function reset() {
   lastQuick.value = 'all'
   // 与页面初始状态一致：保留默认时间范围（今天），而不是全历史空筛选
   emit('apply', collect())
+  emit('reset')
 }
 
 function applyQuick(kind) {
@@ -182,6 +183,7 @@ function applyQuick(kind) {
     clearFilters()
     // 同 reset：保留默认时间范围（今天）
     emit('apply', collect())
+    emit('reset')
   } else if (kind === 'ok') {
     f.status = '200'
     f.errors_only = false
@@ -233,7 +235,14 @@ function setUserAgent(ua) {
   f.user_agent = ua
 }
 
-defineExpose({ collect, setModel, setBackend, setClientIP, setUserAgent })
+// 图表缩放选中的时间区间同步到日期选择器（不触发自动 apply）
+function setTimeRange(fromIso, toIso) {
+  if (debounceTimer) clearTimeout(debounceTimer)
+  suppressWatch = true
+  f.timeRange = [new Date(fromIso), new Date(toIso)]
+}
+
+defineExpose({ collect, setModel, setBackend, setClientIP, setUserAgent, setTimeRange })
 
 onUnmounted(() => {
   if (debounceTimer) clearTimeout(debounceTimer)

@@ -174,13 +174,34 @@ html:not(.dark) .panel:hover {
 .daily-section {
   margin-bottom: 16px;
 }
+.daily-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
 .daily-heading {
   font-size: 13px;
   font-weight: 700;
   color: var(--app-text);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  margin: 0;
+}
+.daily-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.minute-window {
+  width: 140px;
+}
+.daily-hint {
   margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--app-muted, #94a3b8);
 }
 
 /* 指标卡片（分组） */

@@ -99,6 +99,17 @@ func (s *Server) apiDailyStats(c *gin.Context) {
 	httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{"items": items, "days": days})
 }
 
+func (s *Server) apiMinuteStats(c *gin.Context) {
+	minutes := httpx.QueryInt(c.Request, "minutes", 60)
+	f := parseRequestFilter(c.Request)
+	items, err := s.store.GetMinuteStats(minutes, f)
+	if err != nil {
+		httpx.WriteJSON(c.Writer, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{"items": items, "minutes": minutes})
+}
+
 func (s *Server) apiModels(c *gin.Context) {
 	items, err := s.store.GetModels()
 	if err != nil {

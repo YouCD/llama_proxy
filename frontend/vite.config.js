@@ -34,8 +34,9 @@ export default defineConfig(({ command, mode }) => {
       assetsDir: 'assets',
       rollupOptions: {
         output: {
-          manualChunks: {
-            echarts: ['echarts/core', 'echarts/charts', 'echarts/components', 'echarts/renderers'],
+          // Rolldown（vite 8 默认打包器）只支持函数形式的 manualChunks
+          manualChunks(id) {
+            if (id.includes('node_modules/echarts')) return 'echarts'
           },
         },
       },

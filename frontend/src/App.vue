@@ -39,13 +39,28 @@
 
       <div class="panel">
         <section class="daily-section">
-          <h2 class="daily-heading">{{ t('dailyTitle') }}</h2>
-          <DailyChart :items="dailyStats"/>
+          <div class="daily-head">
+            <h2 class="daily-heading">{{ trendMode === 'minute' ? t('minuteTitle') : t('dailyTitle') }}</h2>
+            <div class="daily-controls">
+              <el-radio-group v-model="trendMode" size="small">
+                <el-radio-button value="day">{{ t('trendDay') }}</el-radio-button>
+                <el-radio-button value="minute">{{ t('trendMinute') }}</el-radio-button>
+              </el-radio-group>
+              <el-select v-if="trendMode === 'minute'" v-model="minuteWindow" size="small" class="minute-window">
+                <el-option :label="t('minuteWin30')" :value="30"/>
+                <el-option :label="t('minuteWin60')" :value="60"/>
+                <el-option :label="t('minuteWin180')" :value="180"/>
+                <el-option :label="t('minuteWin360')" :value="360"/>
+              </el-select>
+            </div>
+          </div>
+          <p class="daily-hint">{{ t('chartZoomHint') }}</p>
+          <DailyChart ref="dailyChart" :items="trendStats" :mode="trendMode" @rangechange="onRangeChange"/>
         </section>
       </div>
 
       <FilterPanel ref="filterPanel" :models="models" :backends="backends" :quick-counts="quickCounts"
-                   @apply="onApply"/>
+                   @apply="onApply" @reset="onFilterReset"/>
 
 
       <RequestTable
@@ -70,7 +85,7 @@
 </template>
 
 <script setup>
-import {computed, onMounted, onUnmounted, reactive, ref} from 'vue'
+import {computed, onMounted, onUnmounted, reactive, ref, watch} from 'vue'
 import {Refresh} from '@element-plus/icons-vue'
 import StatsCards from './components/StatsCards.vue'
 import SchedulerStatus from './components/SchedulerStatus.vue'
@@ -86,6 +101,7 @@ import {
   fetchBackends,
   fetchDailyStats,
   fetchInflight,
+  fetchMinuteStats,
   fetchModels,
   fetchRequest,
   fetchRequests,
@@ -109,7 +125,10 @@ const items = ref([])
 const backendStats = ref([])
 const models = ref([])
 const backends = ref([])
-const dailyStats = ref([])
+// 趋势图模式：day（最近 30 天，按天）/ minute（按分钟，窗口可选）
+const trendMode = ref('day')
+const minuteWindow = ref(60)
+const trendStats = ref([])
 const scheduler = ref(null)
 const inflight = ref([])
 const outputSec = ref(0)
@@ -122,6 +141,7 @@ const liveText = ref(t('connecting'))
 const drawerVisible = ref(false)
 const selectedRequest = ref(null)
 const filterPanel = ref(null)
+const dailyChart = ref(null)
 
 const hasFilters = computed(() => Object.keys(filters).length > 0)
 
@@ -213,10 +233,12 @@ async function loadBackendStats() {
   }
 }
 
-async function loadDailyStats() {
+async function loadTrendStats() {
   try {
-    const data = await fetchDailyStats(30, overviewFilters())
-    dailyStats.value = data.items || []
+    const data = trendMode.value === 'minute'
+        ? await fetchMinuteStats(minuteWindow.value, overviewFilters())
+        : await fetchDailyStats(30, overviewFilters())
+    trendStats.value = data.items || []
   } catch {
     /* ignore */
   }
@@ -250,13 +272,20 @@ async function loadOptions() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadStats(), loadRequests(), loadBackendStats(), loadDailyStats(), loadScheduler(), loadInflight()])
+  await Promise.all([loadStats(), loadRequests(), loadBackendStats(), loadTrendStats(), loadScheduler(), loadInflight()])
 }
+
+watch([trendMode, minuteWindow], loadTrendStats)
 
 function onApply(f) {
   setFilters(f)
   refreshAll().catch(() => {
   })
+}
+
+// 筛选面板重置（或点“全部”）：同时复位图表选区，避免面板与图表时间范围不一致
+function onFilterReset() {
+  dailyChart.value?.resetZoom()
 }
 
 function onBackendSelect(url) {
@@ -284,6 +313,15 @@ function onClientIPSelect(ip) {
   filters.client_ip = ip
   refreshAll().catch(() => {
   })
+}
+
+// 图表拖动/缩放选中的日期区间 → 时间范围查询：只影响请求列表（与现有设计一致）
+function onRangeChange({from, to}) {
+  if (filters.time_from === from && filters.time_to === to) return
+  filters.time_from = from
+  filters.time_to = to
+  if (filterPanel.value) filterPanel.value.setTimeRange(from, to)
+  loadRequests().catch(() => { })
 }
 
 function onUserAgentSelect(ua) {
@@ -335,8 +373,9 @@ function connectEvents() {
     Object.assign(llmStats, data)
   })
   eventSource.addEventListener('request', (e) => {
-    // 请求事件：刷新请求列表
+    // 请求事件：刷新请求列表与趋势图（新请求落在最新分钟/当天桶）
     loadRequests().catch(() => {})
+    loadTrendStats().catch(() => {})
   })
   eventSource.addEventListener('scheduler', (e) => {
     const data = JSON.parse(e.data)

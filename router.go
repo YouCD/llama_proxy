@@ -34,6 +34,7 @@ func (s *Server) newRouter() *gin.Engine {
 	pg.Any("/stats", s.apiStats)
 	pg.Any("/stats-by-backend", s.apiStatsByBackend)
 	pg.Any("/daily-stats", s.apiDailyStats)
+	pg.Any("/minute-stats", s.apiMinuteStats)
 	pg.Any("/requests", s.apiRequests)
 	pg.Any("/inflight", s.apiInflight)
 	pg.Any("/models", s.apiModels)
@@ -95,6 +96,7 @@ func (s *Server) apiRoot(c *gin.Context) {
 			"/_proxy/events",
 			"/_proxy/backend-metrics?limit=200",
 			"/_proxy/daily-stats?days=30",
+			"/_proxy/minute-stats?minutes=60",
 			"/_proxy/ui",
 			"/_proxy/scheduler",
 			"/_proxy/scheduler/switch",

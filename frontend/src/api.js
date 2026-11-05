@@ -68,6 +68,14 @@ export async function fetchDailyStats(days, filters = {}) {
   }
 }
 
+export async function fetchMinuteStats(minutes, filters = {}) {
+  const data = await fetchJSON(`/_proxy/minute-stats?${queryString({ minutes, ...filters })}`)
+  return {
+    items: Array.isArray(data.items) ? data.items : [],
+    minutes: data.minutes || minutes,
+  }
+}
+
 export async function fetchScheduler() {
   return fetchJSON('/_proxy/scheduler')
 }
