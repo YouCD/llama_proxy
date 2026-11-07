@@ -77,13 +77,22 @@ const allCards = computed(() => groups.value.flatMap(g => g.cards))
 .stats-grid {
   display: grid;
   gap: 12px;
-  /* 固定列数：卡片均分铺满整行，不产生孤卡拉伸或右侧留白 */
-  grid-template-columns: repeat(5, 1fr);
+  /* 固定宽卡片：每张 220px，左右顶格，卡间距等分剩余空间 */
+  grid-template-columns: repeat(auto-fit, 220px);
+  justify-content: space-between;
 }
 @media (max-width: 799px) {
-  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  /* 手机宽度：两列等分（单卡约 169px），间距固定 8px；
+     不用 space-between——固定宽卡片被推到两端会在中间挤出大缝隙 */
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
 }
-@media (max-width: 460px) {
-  .stats-grid { grid-template-columns: 1fr; }
+@media (max-width: 360px) {
+  /* 超窄屏兑底：单列流式 */
+  .stats-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 </style>

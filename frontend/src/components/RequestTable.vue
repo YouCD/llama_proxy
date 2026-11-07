@@ -5,7 +5,7 @@
       :data="rows"
       :highlight-current-row="true"
       size="small"
-      height="560"
+      :height="isMobile ? 400 : 560"
       :row-class-name="rowClassName"
       @row-click="onRowClick"
     >
@@ -22,7 +22,7 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colClient')" min-width="110">
+      <el-table-column v-if="!isMobile" :label="t('colClient')" min-width="110">
         <template #default="{ row }">
           <span
             v-if="row.client_ip"
@@ -33,7 +33,7 @@
           <span v-else class="cell-subtle">-</span>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colUserAgent')" min-width="150">
+      <el-table-column v-if="!isMobile" :label="t('colUserAgent')" min-width="150">
         <template #default="{ row }">
           <span
             v-if="row.user_agent"
@@ -90,7 +90,7 @@
           </el-tooltip>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colPromptPerSec')" min-width="80" align="right">
+      <el-table-column v-if="!isMobile" :label="t('colPromptPerSec')" min-width="80" align="right">
         <template #default="{ row }">
           <span :class="rateTone(row.decode_tok_per_sec || 0)">{{ fmtRate(row.decode_tok_per_sec || 0) }}</span>
         </template>
@@ -127,6 +127,7 @@ import { computed } from 'vue'
 import { CopyDocument, View } from '@element-plus/icons-vue'
 import { t } from '../i18n'
 import { fetchRaw } from '../api'
+import { useViewport } from '../useViewport'
 import {
   fmtNum, fmtRate, fmtPercent, fmtLatency, fmtTokens, shortQuery, shortenBackendUrl,
   isCompleted as completed, statusClass, latencyTone, rateTone, cacheTone, methodClass, copyText,
@@ -139,6 +140,9 @@ const props = defineProps({
   pageSize: { type: Number, default: 100 },
 })
 const emit = defineEmits(['loadMore', 'select', 'select-backend', 'select-client-ip', 'select-user-agent'])
+
+// 移动端隐藏低价值列（客户端 IP / User-Agent / 提示词速率），减少横向滚动距离
+const { isMobile } = useViewport()
 
 const BREAK_MS = 30 * 60 * 1000
 

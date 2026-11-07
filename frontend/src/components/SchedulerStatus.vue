@@ -223,7 +223,7 @@ const badgeLabel = computed(() => {
   gap: 18px;
   margin-top: 10px;
   padding: 14px 18px;
-  border: 1px solid var(--color-rule);
+  border: 1px solid var(--app-line);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.015);
   flex-wrap: wrap;
@@ -233,7 +233,7 @@ const badgeLabel = computed(() => {
 }
 .ph-text {
   font-size: 13px;
-  color: var(--color-faint);
+  color: var(--app-muted);
 }
 
 .dot-big {
@@ -242,18 +242,18 @@ const badgeLabel = computed(() => {
   height: 14px;
   border-radius: 50%;
   flex: none;
-  background: var(--color-faint);
+  background: var(--app-muted);
 }
 .dot-big.ok {
   background: #22c55e;
   box-shadow: 0 0 10px rgba(34, 197, 94, 0.8);
 }
 .dot-big.loading {
-  background: var(--color-amber);
+  background: var(--app-warn);
   box-shadow: 0 0 8px rgba(245, 158, 11, 0.5);
 }
 .dot-big.err {
-  background: var(--color-crimson);
+  background: var(--app-bad);
   box-shadow: 0 0 8px rgba(220, 80, 80, 0.6);
 }
 
@@ -271,7 +271,7 @@ const badgeLabel = computed(() => {
 .sched-mode {
   font-weight: 700;
   font-size: 15px;
-  color: var(--color-text);
+  color: var(--app-text);
 }
 .sched-badge {
   font-size: 11px;
@@ -286,19 +286,19 @@ const badgeLabel = computed(() => {
   background: rgba(34, 197, 94, 0.1);
 }
 .sched-badge.loading {
-  color: var(--color-amber);
+  color: var(--app-warn);
   border-color: rgba(245, 158, 11, 0.5);
   background: rgba(245, 158, 11, 0.1);
 }
 .sched-badge.err {
-  color: var(--color-crimson);
+  color: var(--app-bad);
   border-color: rgba(220, 80, 80, 0.5);
   background: rgba(220, 80, 80, 0.1);
 }
 .vsep {
   width: 1px;
   align-self: stretch;
-  background: var(--color-rule);
+  background: var(--app-line);
   flex: none;
 }
 
@@ -314,18 +314,18 @@ const badgeLabel = computed(() => {
   align-items: center;
   gap: 7px;
   padding: 4px 10px;
-  border: 1px solid var(--color-rule);
+  border: 1px solid var(--app-line);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.015);
 }
 .mc-id {
   font-size: 12.5px;
   font-weight: 600;
-  color: var(--color-text);
+  color: var(--app-text);
 }
 .mc-pid {
   font-size: 11px;
-  color: var(--color-dim);
+  color: var(--app-muted);
 }
 .mc-cur {
   font-size: 10.5px;
@@ -340,7 +340,7 @@ const badgeLabel = computed(() => {
   height: 8px;
   border-radius: 50%;
   flex: none;
-  background: var(--color-faint);
+  background: var(--app-muted);
 }
 .model-chip.mc-ok .mc-dot {
   background: #22c55e;
@@ -350,28 +350,28 @@ const badgeLabel = computed(() => {
   border-color: rgba(245, 158, 11, 0.55);
 }
 .model-chip.mc-loading .mc-dot {
-  background: var(--color-amber);
+  background: var(--app-warn);
   box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
 }
 .model-chip.mc-loading .mc-id {
-  color: var(--color-amber);
+  color: var(--app-warn);
 }
 .model-chip.mc-err {
   border-color: rgba(220, 80, 80, 0.5);
 }
 .model-chip.mc-err .mc-dot {
-  background: var(--color-crimson);
+  background: var(--app-bad);
 }
 .model-chip.mc-fail {
   border-color: rgba(245, 80, 120, 0.55);
 }
 .model-chip.mc-fail .mc-dot {
-  background: var(--color-crimson);
+  background: var(--app-bad);
   box-shadow: 0 0 7px rgba(245, 80, 120, 0.7);
   animation: mc-fail-pulse 1.2s ease-in-out infinite alternate;
 }
 .model-chip.mc-fail .mc-id {
-  color: var(--color-crimson);
+  color: var(--app-bad);
 }
 @keyframes mc-fail-pulse {
   from { opacity: 1; }
@@ -424,8 +424,8 @@ const badgeLabel = computed(() => {
   padding: 2px 0;
   border-radius: 4px;
 }
-.mi-coding { color: var(--color-gold); background: rgba(200, 160, 90, 0.12); }
-.mi-bg { color: var(--color-steel); background: rgba(140, 160, 190, 0.12); }
+.mi-coding { color: var(--app-warn); background: rgba(200, 160, 90, 0.12); }
+.mi-bg { color: var(--app-muted); background: rgba(140, 160, 190, 0.12); }
 .mi-cur-chip {
   color: #4ade80;
   background: rgba(34, 197, 94, 0.12);
@@ -441,14 +441,14 @@ const badgeLabel = computed(() => {
   margin-bottom: 10px;
   font-size: 14px;
   font-weight: 700;
-  color: var(--color-text);
+  color: var(--app-text);
 }
 .live-dot {
   display: inline-block;
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--color-faint);
+  background: var(--app-muted);
   flex: none;
 }
 .live-dot.live {
@@ -457,7 +457,7 @@ const badgeLabel = computed(() => {
 }
 .inflight-empty {
   font-size: 12px;
-  color: var(--color-faint);
+  color: var(--app-muted);
   font-style: italic;
 }
 
@@ -478,7 +478,7 @@ const badgeLabel = computed(() => {
 .ip-val {
   font-weight: 700;
   font-size: 13px;
-  color: var(--color-text);
+  color: var(--app-text);
   vertical-align: middle;
 }
 
@@ -501,7 +501,7 @@ const badgeLabel = computed(() => {
   vertical-align: middle;
 }
 
-.cell-subtle { color: var(--color-faint); }
+.cell-subtle { color: var(--app-muted); }
 </style>
 
 <style>
@@ -516,9 +516,10 @@ const badgeLabel = computed(() => {
 .el-dropdown-menu .mi-current .mi-id {
   color: #4ade80 !important;
 }
-/* 菜单固定 300px 宽；模型过多时限高内部滚动 */
+/* 菜单固定 300px 宽；模型过多时限高内部滚动；窄屏（手机）限宽到视口内 */
 .mi-popper .el-dropdown-menu {
   width: 300px;
+  max-width: calc(100vw - 24px);
   max-height: 300px;
   overflow-y: auto;
 }

@@ -13,7 +13,7 @@
           <span class="lang-btn" :title="t('themeToggle')" @click="toggleTheme">
             <span class="lang-icon">{{ currentTheme === 'dark' ? '☀️' : '🌙' }}</span>
           </span>
-          <el-dropdown trigger="hover" @command="onLangCommand">
+          <el-dropdown trigger="click" @command="onLangCommand">
             <span class="lang-btn">
               <span class="lang-icon">🌐</span>
               <span>{{ currentLang === 'zh' ? '中文' : 'English' }}</span>

@@ -252,4 +252,16 @@ function hitTone(hit) {
 @media (max-width: 900px) {
   .tb-model-name { flex-basis: 100px; }
 }
+
+/* 手机宽度：进一步压缩模型名列与间距，保证构成条 + 总数 + 命中率可并排显示 */
+@media (max-width: 480px) {
+  .tb-overview { gap: 10px; }
+  .tb-total-num { font-size: 18px; }
+  .tb-bar { min-width: 160px; }
+  .tb-legend { gap: 8px 10px; font-size: 11px; }
+  .tb-model-row { gap: 8px; }
+  .tb-model-name { flex-basis: 72px; font-size: 11px; }
+  .tb-model-total { flex-basis: 52px; font-size: 11px; }
+  .tb-model-hit { flex-basis: 48px; font-size: 11px; }
+}
 </style>

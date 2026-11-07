@@ -431,4 +431,17 @@ html.dark .chart-section:hover {
   width: 100%;
   height: 260px;
 }
+
+/* 手机宽度：三图纵向堆叠，降低单图高度避免过度滚屏 */
+@media (max-width: 640px) {
+  .charts-grid {
+    gap: 10px;
+  }
+  .chart-section {
+    padding: 10px;
+  }
+  .chart-box {
+    height: 210px;
+  }
+}
 </style>

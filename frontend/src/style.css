@@ -743,3 +743,115 @@ html.dark .backend-bar:hover {
   padding: 20px;
   text-align: center;
 }
+
+/* ————— 移动端适配（≤767px） ————— */
+@media (max-width: 767px) {
+  .app-shell {
+    padding: 12px 12px 40px;
+  }
+  .app-header {
+    margin-bottom: 14px;
+    gap: 10px;
+  }
+  .app-header .title {
+    font-size: 18px;
+  }
+  .app-header .subtitle {
+    font-size: 12px;
+  }
+  .header-logo {
+    width: 36px;
+    height: 36px;
+    margin-top: 2px;
+  }
+  .header-actions {
+    gap: 8px;
+  }
+  .lang-btn {
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+  .panel {
+    padding: 12px;
+    margin-bottom: 12px;
+  }
+  .stat-card {
+    padding: 8px 10px;
+  }
+  .stat-card .value {
+    font-size: 22px;
+    height: 26px;
+  }
+  .stat-card .value.value-sm {
+    font-size: 16px;
+  }
+  /* 后端统计条：窄屏改为纵向堆叠（名称行 → 成功率轨道 → 指标行），
+     固定宽度的 metrics 列（312px）在手机上无法容纳 */
+  .backend-bar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    row-gap: 6px;
+    padding: 10px 12px;
+  }
+  .backend-load,
+  .backend-metrics {
+    grid-column: 1 / -1;
+  }
+  .backend-metrics {
+    flex-wrap: wrap;
+    gap: 10px 14px;
+    justify-content: flex-start;
+  }
+  .metric-cell {
+    width: auto;
+  }
+  /* 时间范围选择器：360px 固定宽在小屏溢出面板，改为撑满 */
+  .filter-bar .time-range {
+    --el-date-editor-width: 100%;
+    width: 100% !important;
+    max-width: 100% !important;
+    flex: 1 1 100%;
+  }
+  /* 筛选栏：一行两个筛选条件，时间范围/工具行/复选框行整行 */
+  .filter-bar {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .filter-bar .time-range,
+  .filter-bar .filter-tools,
+  .filter-bar .filter-check {
+    grid-column: 1 / -1;
+  }
+  .filter-bar .el-select {
+    width: 100%;
+  }
+  .filter-tools {
+    margin-left: 0;
+  }
+  /* 高级筛选输入框整行宽 */
+  .filter-bar.adv-panel .el-input,
+  .filter-bar.adv-panel .el-select {
+    width: 100% !important;
+  }
+  /* 快捷标签：收窄间距与内边距，两行内放下全部标签 */
+  .quick-tags {
+    gap: 6px;
+  }
+  .quick-tag {
+    padding: 3px 10px;
+  }
+  /* 确认弹窗默认 420px 宽，小屏会溢出视口 */
+  .el-message-box {
+    width: calc(100vw - 32px) !important;
+  }
+  /* 表格内部横向滚动：iOS 惯性滚动 */
+  .el-table__body-wrapper {
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+@media (max-width: 480px) {
+  .backend-name {
+    font-size: 12px;
+  }
+}
