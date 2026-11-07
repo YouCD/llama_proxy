@@ -21,6 +21,10 @@ type ModelStatus struct {
 	Sleeping  bool // 计划内休眠（闲置超时后主动停进程），属健康状态而非故障
 	FailCount int  // 连续启动失败（未就绪即退出/崩溃）次数，就绪后清零
 	NextRetry *time.Time // 启动失败退避：该时刻前不重复拉起；nil 表示无退避
+	// LoadStartedAt 进行中的加载开始时刻（进程已启动、尚未就绪）；nil 表示无在途加载。
+	LoadStartedAt *time.Time
+	// LoadDuration 最近一次成功加载的完整耗时（进程启动→就绪探测通过）；零值表示无记录。
+	LoadDuration time.Duration
 }
 
 // Snapshot 为调度器内部状态的只读快照，供监控面板展示。
@@ -67,6 +71,13 @@ func (s *Scheduler) Snapshot() Snapshot {
 			} else if sl.cmd != nil && sl.cmd.Process != nil {
 				st.PID = sl.cmd.Process.Pid
 			}
+			// 加载计时：仅在进行中的加载（进程存活且未就绪）时暴露开始时刻；
+			// 最近一次成功加载的耗时则始终随快照返回（就绪后由面板展示）。
+			if !sl.readyOK && !sl.loadStartedAt.IsZero() {
+				t := sl.loadStartedAt
+				st.LoadStartedAt = &t
+			}
+			st.LoadDuration = sl.lastLoadDuration
 		}
 		if n, ok := s.failCount[id]; ok {
 			st.FailCount = n

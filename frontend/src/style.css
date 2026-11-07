@@ -850,6 +850,12 @@ html.dark .backend-bar:hover {
   }
 }
 
+/* 表格表头不换行（PC/移动端通用）：列宽不足时整列变宽，
+   而不是把“耗时 (TTFT/总计)”折成“TTF T”这样的残行 */
+.el-table th.el-table__cell > .cell {
+  white-space: nowrap;
+}
+
 @media (max-width: 480px) {
   .backend-name {
     font-size: 12px;

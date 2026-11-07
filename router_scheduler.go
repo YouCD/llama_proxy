@@ -170,6 +170,12 @@ func (s *Server) schedulerStatus() map[string]any {
 				m["next_retry"] = st.NextRetry.UTC().Format(time.RFC3339)
 			}
 		}
+		if st.LoadStartedAt != nil {
+			m["load_started_at"] = st.LoadStartedAt.UTC().Format(time.RFC3339)
+		}
+		if st.LoadDuration > 0 {
+			m["load_ms"] = st.LoadDuration.Milliseconds()
+		}
 		models = append(models, m)
 	}
 	status["models"] = models

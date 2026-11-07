@@ -224,6 +224,8 @@ func (s *Scheduler) launchSlot(ctx context.Context, id string) *procSlot {
 		// 启动前确认端口无残留监听者（如上一次代理进程遗留的 setsid 服务），
 		// 否则新服务绑定端口会失败、启动超时卡死切换。
 		s.freeOccupiedPort(ctx, slot.port, s.sw.KillTimeout)
+		// 加载起点：面板据此展示“加载中 Ns”实时计时与加载完成后的总耗时。
+		slot.loadStartedAt = time.Now()
 		cmd := exec.Command("/bin/sh", "-c", e.Command)
 		if f != nil {
 			cmd.Stdout = f
@@ -310,6 +312,10 @@ func (s *Scheduler) markSlotReady(id string) {
 	sl := s.procs[id]
 	if sl == nil || sl.readyOK {
 		return
+	}
+	// 加载耗时：进程启动（launchSlot/restartMember 记 loadStartedAt）到就绪探测通过。
+	if !sl.loadStartedAt.IsZero() {
+		sl.lastLoadDuration = time.Since(sl.loadStartedAt)
 	}
 	sl.readyOK = true
 	s.clearStartupFailLocked(id)

@@ -245,10 +245,11 @@ func (s *Scheduler) restartMember(ctx context.Context, id string) {
 	}
 	sl.cmd = cmd
 	sl.readyOK = false
-	// 不重置 readyChClosed，也不换新 channel（沿用"重启复用原 channel"的既有语义）：
+	// 不重置 readyChClosed，也不换新 channel（沿用“重启复用原 channel”的既有语义）：
 	// 就绪前崩溃者其为 false，重启后就绪会 close channel；就绪后崩溃（含休眠唤醒）
-	// 者其为 true（channel 已关），markSlotReady 不再二次 close 而 panic。等待者拿到
-	// 的仍是同一 channel：就绪后崩溃再唤醒，旧等待者早已解除。
+	// 者其为 true（channel 已关），markSlotReady 不再二次 close 而 panic。
+	// 加载起点：面板展示“加载中 Ns”与加载耗时（与 launchSlot 语义一致）。
+	sl.loadStartedAt = time.Now()
 	sl.sleeping = false // 唤醒即脱离休眠态，reconcile 恢复正常探活
 	sl.logFile = f
 	s.mu.Unlock()

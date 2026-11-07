@@ -14,7 +14,7 @@
           <div class="mono">{{ row._rel }}</div>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colRequest')" min-width="120">
+      <el-table-column :label="t('colRequest')" min-width="140">
         <template #default="{ row }">
           <div class="req-line">
             <span :class="'method-badge ' + methodClass(row.method)">{{ row.method || '-' }}</span>
@@ -22,7 +22,7 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column v-if="!isMobile" :label="t('colClient')" min-width="110">
+      <el-table-column v-if="!isMobile" :label="t('colClient')" min-width="90">
         <template #default="{ row }">
           <span
             v-if="row.client_ip"
@@ -33,7 +33,7 @@
           <span v-else class="cell-subtle">-</span>
         </template>
       </el-table-column>
-      <el-table-column v-if="!isMobile" :label="t('colUserAgent')" min-width="150">
+      <el-table-column v-if="!isMobile" :label="t('colUserAgent')" min-width="120">
         <template #default="{ row }">
           <span
             v-if="row.user_agent"
@@ -44,7 +44,7 @@
           <span v-else class="cell-subtle">-</span>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colBackend')" min-width="150">
+      <el-table-column :label="t('colBackend')" min-width="110">
         <template #default="{ row }">
           <span
             v-if="row.backend_url"
@@ -62,7 +62,7 @@
           </span>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colModel')" min-width="140">
+      <el-table-column :label="t('colModel')" min-width="160">
         <template #default="{ row }">
           <div class="model-cell">
             <span :title="row.model || ''" class="model-name">{{ row.model || '-' }}</span>

@@ -33,6 +33,11 @@ type procSlot struct {
 	// ensureBackground→restartMember 唤醒。区别于崩溃：reap 观察到 sleeping 不记
 	// 失败、不退避，reconcile 不自动拉起，组切换（switchTo）也不打扰它。
 	sleeping bool
+	// loadStartedAt 本次加载开始时刻（进程启动），用于监控面板展示加载耗时；
+	// lastLoadDuration 最近一次成功加载的完整耗时（启动→就绪探测通过）。
+	// 均由 s.mu 保护。
+	loadStartedAt    time.Time
+	lastLoadDuration time.Duration
 }
 
 // running 报告槽位是否仍有进程在运行：包装命令存活，或已接管到仍存活的真实服务。

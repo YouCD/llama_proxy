@@ -216,6 +216,9 @@ const messages = {
     schedSwitchSkipped: '已跳过切换：coding 租约仍活跃',
     schedSwitchFailed: '切换失败：{msg}',
     schedCurrent: '当前',
+    schedLoadElapsed: '加载中 {n}s',
+    schedLoadDone: '已加载 {n}',
+    schedLoadTimeTip: '本次模型加载耗时：进程启动至就绪探测通过',
     // 当前请求（在途）
     inflightTitle: '当前请求',
     inflightCount: '{n} 个进行中',
@@ -430,6 +433,9 @@ const messages = {
     schedSwitchSkipped: 'Switch skipped: coding lease still active',
     schedSwitchFailed: 'Switch failed: {msg}',
     schedCurrent: 'current',
+    schedLoadElapsed: 'loading {n}s',
+    schedLoadDone: 'loaded in {n}',
+    schedLoadTimeTip: 'model load duration: process start to ready probe',
     // In-flight requests
     inflightTitle: 'In-flight Requests',
     inflightCount: '{n} active',

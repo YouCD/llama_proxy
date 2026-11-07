@@ -19,22 +19,48 @@
   <div v-else-if="data.enabled" class="panel sched-panel-fixed">
     <div class="section-title">{{ t('schedulerTitle') }}</div>
 
-    <!-- 状态卡片 -->
+    <!-- 状态卡片：上行 = 标题（左）+ 切换按钮（右）恒同一行；下行 = 常驻进程 chips，
+         溢出自行换行，避免旧版「标题 / chips / 按钮」三行折行留白 -->
     <div class="sched-card">
-      <div class="sched-id">
-        <span class="dot-big" :class="stateDot"></span>
-        <div class="sched-id-text">
-          <div class="sched-mode-line">
-            <span class="sched-mode">{{ modeLabel }}</span>
-            <span class="sched-badge" :class="stateDot">{{ badgeLabel }}</span>
-          </div>
+      <div class="sched-top">
+        <div class="sched-id">
+          <span class="dot-big" :class="stateDot"></span>
+          <span class="sched-mode">{{ modeLabel }}</span>
+          <span class="sched-badge" :class="stateDot">{{ badgeLabel }}</span>
+        </div>
+
+        <div class="sched-right">
+          <el-dropdown v-if="switchable" trigger="click" popper-class="mi-popper" @command="onSwitch">
+            <el-button size="small" class="switch-btn" :loading="switching">
+              {{ t('schedSwitch') }} <el-icon><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  v-for="m in data.models"
+                  :key="m.id"
+                  :command="m.id"
+                  :disabled="m.active"
+                  class="mi-item"
+                  :class="{ 'mi-current': m.active }"
+                >
+                  <span class="mi-id mono" :title="m.id">{{ m.id }}</span>
+                  <span v-if="m.active" class="mi-mode mi-cur-chip">
+                    {{ m.mode }} · {{ t('schedCurrent') }}
+                  </span>
+                  <span v-else class="mi-mode" :class="m.mode === 'coding' ? 'mi-coding' : 'mi-bg'">
+                    {{ m.mode }}
+                  </span>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </div>
 
-      <div class="vsep"></div>
-
       <!-- 常驻进程 chips：只列正在运行/已就绪的模型（background 组态下为常驻组成员，
-           coding 态下仅当前 coding 模型），完整模型列表由右侧「切换模型」下拉承担 -->
+           coding 态下仅当前 coding 模型），完整模型列表由上方「切换模型」下拉承担。
+           “当前”只标在 coding 模型上——background 常驻态所有节点同时在线，不存在唯一“当前” -->
       <div class="sched-models">
         <div
           v-for="m in residentModels"
@@ -44,42 +70,13 @@
           :title="mcTitle(m)"
         >
           <span class="mc-dot"></span>
-          <span class="mono mc-id">{{ m.id }}</span>
+          <span class="mono mc-id" :title="m.id">{{ m.id }}</span>
           <span v-if="m.pid" class="mono mc-pid">{{ m.pid }}</span>
-          <span v-if="m.active" class="mc-cur">{{ t('schedCurrent') }}</span>
+          <span v-if="m.running && !m.ready && !m.sleeping && !m.fail_count && m.load_started_at" class="mono mc-load">{{ t('schedLoadElapsed', { n: elapsed(m) }) }}</span>
+          <span v-else-if="m.ready && m.load_ms != null" class="mono mc-load ok" :title="t('schedLoadTimeTip')">{{ t('schedLoadDone', { n: fmtMs(m.load_ms) }) }}</span>
+          <span v-if="m.mode === 'coding' && m.active" class="mc-cur">{{ t('schedCurrent') }}</span>
         </div>
         <span v-if="!residentModels.length" class="cell-subtle">-</span>
-      </div>
-
-      <div class="sched-right">
-        <el-dropdown v-if="switchable" trigger="click" popper-class="mi-popper" @command="onSwitch">
-          <el-button size="small" class="switch-btn" :loading="switching">
-            {{ t('schedSwitch') }} <el-icon><ArrowDown /></el-icon>
-          </el-button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item
-                v-for="m in data.models"
-                :key="m.id"
-                :command="m.id"
-                :disabled="m.active"
-                class="mi-item"
-                :class="{ 'mi-current': m.active }"
-              >
-                <span class="mi-id mono" :title="m.id">{{ m.id }}</span>
-                <span v-if="m.active" class="mi-mode mi-cur-chip">
-                  {{ m.mode }} · {{ t('schedCurrent') }}
-                </span>
-                <span v-else class="mi-mode" :class="m.mode === 'coding' ? 'mi-coding' : 'mi-bg'">
-                  {{ m.mode }}
-                </span>
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
-        <span v-if="inflight.length" class="inflight-pill">
-          {{ inflight.length }} {{ t('inflightPill') }}
-        </span>
       </div>
     </div>
 
@@ -88,6 +85,10 @@
       <div class="inflight-heading">
         <span class="live-dot" :class="inflight.length ? 'live' : ''"></span>
         {{ t('inflightTitle') }}
+        <!-- “N 个进行中”跟随它描述的请求列表，不再孤立在卡片右下角 -->
+        <span v-if="inflight.length" class="inflight-pill">
+          {{ inflight.length }} {{ t('inflightPill') }}
+        </span>
       </div>
 
       <div class="table-box">
@@ -130,7 +131,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ArrowDown } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { t } from '../i18n'
@@ -142,6 +143,31 @@ const props = defineProps({
 })
 
 const switching = ref(false)
+
+// 每秒跳动的时钟：驱动模板中“加载中 Ns”实时刷新（后端仅在状态变化时推事件，
+// 加载期间的秒级计时必须由前端自行驱动）。
+const nowTs = ref(Date.now())
+let tickTimer = null
+onMounted(() => {
+  tickTimer = setInterval(() => (nowTs.value = Date.now()), 1000)
+})
+onUnmounted(() => {
+  if (tickTimer) clearInterval(tickTimer)
+})
+
+// 进行中的加载已持续秒数（load_started_at 为 RFC3339 UTC）。
+function elapsed(m) {
+  const start = new Date(m.load_started_at).getTime()
+  if (Number.isNaN(start)) return 0
+  return Math.max(0, Math.floor((nowTs.value - start) / 1000))
+}
+
+// 毫秒时长人读格式：<60s 保留一位小数，否则分秒。
+function fmtMs(ms) {
+  const s = ms / 1000
+  if (s < 60) return s.toFixed(1) + 's'
+  return Math.floor(s / 60) + 'm ' + Math.round(s % 60) + 's'
+}
 
 async function onSwitch(modelId) {
   switching.value = true
@@ -219,17 +245,19 @@ const badgeLabel = computed(() => {
 /* —— 状态卡片 —— */
 .sched-card {
   display: flex;
-  align-items: center;
-  gap: 18px;
+  flex-direction: column;
+  gap: 10px;
   margin-top: 10px;
   padding: 14px 18px;
   border: 1px solid var(--app-line);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.015);
-  flex-wrap: wrap;
 }
+/* 加载占位保持单行居中，不被卡片纵向布局叠行 */
 .sched-card-ph {
+  flex-direction: row;
   align-items: center;
+  justify-content: center;
 }
 .ph-text {
   font-size: 13px;
@@ -257,16 +285,19 @@ const badgeLabel = computed(() => {
   box-shadow: 0 0 8px rgba(220, 80, 80, 0.6);
 }
 
-.sched-id {
+/* 上行：标题（左）+ 切换按钮（右）恒同一行，不再折行 */
+.sched-top {
   display: flex;
   align-items: center;
   gap: 12px;
   min-width: 0;
 }
-.sched-mode-line {
+.sched-id {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  flex: none;
 }
 .sched-mode {
   font-weight: 700;
@@ -295,13 +326,6 @@ const badgeLabel = computed(() => {
   border-color: rgba(220, 80, 80, 0.5);
   background: rgba(220, 80, 80, 0.1);
 }
-.vsep {
-  width: 1px;
-  align-self: stretch;
-  background: var(--app-line);
-  flex: none;
-}
-
 /* —— 模型成员 chips —— */
 .sched-models {
   display: flex;
@@ -322,10 +346,36 @@ const badgeLabel = computed(() => {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--app-text);
+  /* 自适应宽度：短名不拉齐、长名到上限才省略，悬停（title）看全名 */
+  display: inline-block;
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+@media (max-width: 767px) {
+  /* 移动端：收窄上限，保证 chip 行内放下多个模型 */
+  .mc-id {
+    max-width: 110px;
+  }
 }
 .mc-pid {
   font-size: 11px;
   color: var(--app-muted);
+}
+.mc-load {
+  font-size: 11px;
+  color: var(--app-warn);
+  background: rgba(217, 119, 6, 0.12);
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+.mc-load.ok {
+  color: var(--app-ok);
+  background: rgba(22, 163, 74, 0.12);
 }
 .mc-cur {
   font-size: 10.5px;
