@@ -376,7 +376,7 @@ GET    /_proxy/ui                        Web 面板
 |---|---|
 | `q` | 关键词搜索（匹配 id/路径/query/客户端 IP/模型/错误信息） |
 | `path` / `model` / `backend` / `method` | 精确/前缀匹配过滤 |
-| `status` | 状态码过滤 |
+| `status` | 状态码过滤：数字精确匹配（如 `200`），或状态码段 `4xx`（400–499）/ `5xx`（≥500） |
 | `time_from` / `time_to` | 绝对时间窗口（RFC3339 或本地时间写法，如 `2026-09-13T00:00:00+08:00`）；省略时回退到 `hours`/`days` |
 | `stream` | `true`/`false` 过滤流式/非流式请求 |
 | `errors_only` | 仅失败请求 |

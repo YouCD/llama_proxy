@@ -41,14 +41,17 @@ func (RequestRecord) TableName() string {
 }
 
 type RequestFilter struct {
-	Path                string
-	Model               string
-	Method              string
-	Backend             string
-	ClientIP            string
-	UserAgent           string
-	Search              string
-	StatusCode          int
+	Path       string
+	Model      string
+	Method     string
+	Backend    string
+	ClientIP   string
+	UserAgent  string
+	Search     string
+	StatusCode int
+	// StatusClass 状态码段过滤："4xx"（400–499）或 "5xx"（≥500），空串表示不限。
+	// 与 StatusCode 互斥使用，二者同时非空时 StatusCode 生效。
+	StatusClass         string
 	TimeFrom            time.Time // 开始时间（含），零值表示不限
 	TimeTo              time.Time // 结束时间（含），零值表示不限
 	Streaming           *bool

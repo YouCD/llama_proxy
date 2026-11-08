@@ -118,10 +118,11 @@ func (st *Store) GetStats(f model.RequestFilter) (map[string]any, error) {
 		"lifetime_total_requests":    lifetimeRequests,
 		"lifetime_prompt_tokens":     lifetimePromptTokens,
 		"lifetime_cached_tokens":     lifetimeCachedTokens,
+		"lifetime_input_tokens":      lifetimePromptTokens - lifetimeCachedTokens,
 		"lifetime_completion_tokens": lifetimeCompletionTokens,
 		"lifetime_total_tokens":      lifetimeTokens,
 		"lifetime_cache_hit_pct":     lifetimeCacheHitPct(lifetimePromptTokens, lifetimeCachedTokens),
-		"token_by_model":             st.tokenBreakdownByModel(f),
+		"token_by_model":             st.tokenBreakdownByModel(model.RequestFilter{}),
 		"total_request_bytes":        reqBytes,
 		"total_response_bytes":       respBytes,
 		"avg_prompt_ms":              avgPromptMs,
@@ -407,6 +408,7 @@ func lifetimeCacheHitPct(prompt, cached int64) float64 {
 }
 
 // tokenBreakdownByModel 按模型聚合 token 构成（输入/缓存/输出/命中率），只返回 token 总量前 10 的模型。
+// 固定统计全生命周期（不受筛选窗口影响），与前端 Token 构成面板的“总”口径一致。
 // 查询失败时返回空列表，不影响主统计返回。
 func (st *Store) tokenBreakdownByModel(f model.RequestFilter) []map[string]any {
 	query := `SELECT

@@ -116,3 +116,25 @@ func TestMonitorModelsEndpointViaAPI(t *testing.T) {
 		t.Fatalf("expected [test-model], got %v", payload.Items)
 	}
 }
+
+func TestParseRequestFilterStatusClasses(t *testing.T) {
+	cases := []struct {
+		status    string
+		wantCode  int
+		wantClass string
+	}{
+		{"200", 200, ""},
+		{"4xx", 0, "4xx"},
+		{"5XX", 0, "5xx"},
+		{"", 0, ""},
+		{"garbage", 0, ""},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodGet, "/_proxy/requests?status="+tc.status, nil)
+		f := parseRequestFilter(req)
+		if f.StatusCode != tc.wantCode || f.StatusClass != tc.wantClass {
+			t.Fatalf("status=%q: code=%d class=%q, want code=%d class=%q",
+				tc.status, f.StatusCode, f.StatusClass, tc.wantCode, tc.wantClass)
+		}
+	}
+}

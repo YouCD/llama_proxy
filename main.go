@@ -142,14 +142,21 @@ func main() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
+			// 广播窗口与 HTTP API 默认窗口一致（最近 24 小时）：
+			// 零值时间会被 GetStats 当作不限窗口且时长按 1s 兜底，
+			// 会把 requests_per_minute 等速率指标算成 全生命周期总量×60。
+			base := model.RequestFilter{}
+			base.TimeFrom, base.TimeTo = s.store.EffectiveWindow(base, 24)
 			// 普通统计
-			stats, err := s.store.GetStats(model.RequestFilter{})
+			stats, err := s.store.GetStats(base)
 			if err != nil {
 				continue
 			}
 			s.hub.BroadcastWithType("stats", stats)
-			// LLM 统计（只包含 chat_completions）
-			llmStats, err := s.store.GetStats(model.RequestFilter{ChatCompletionsOnly: true})
+			// LLM 统计（只包含 chat_completions，同一时间窗口）
+			llmFilter := base
+			llmFilter.ChatCompletionsOnly = true
+			llmStats, err := s.store.GetStats(llmFilter)
 			if err != nil {
 				continue
 			}

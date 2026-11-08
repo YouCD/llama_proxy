@@ -104,7 +104,6 @@ const f = reactive({
   chat_only: false,
 })
 const showAdv = ref(false)
-const lastQuick = ref('all')
 
 let debounceTimer = null
 let suppressWatch = false
@@ -169,7 +168,6 @@ function reset() {
   if (debounceTimer) clearTimeout(debounceTimer)
   suppressWatch = true
   clearFilters()
-  lastQuick.value = 'all'
   // 与页面初始状态一致：保留默认时间范围（今天），而不是全历史空筛选
   emit('apply', collect())
   emit('reset')
@@ -178,7 +176,6 @@ function reset() {
 function applyQuick(kind) {
   if (debounceTimer) clearTimeout(debounceTimer)
   suppressWatch = true
-  lastQuick.value = kind
   if (kind === 'all') {
     clearFilters()
     // 同 reset：保留默认时间范围（今天）
@@ -190,8 +187,10 @@ function applyQuick(kind) {
     f.stream = ''
     emit('apply', collect())
   } else if (kind === '4xx' || kind === '5xx') {
-    f.status = ''
-    f.errors_only = true
+    // 后端 status 参数支持状态码段过滤（4xx = 400–499，5xx = ≥500），
+    // 直接写入 status 输入框，用户可见且可手动清除。
+    f.status = kind
+    f.errors_only = false
     f.stream = ''
     emit('apply', collect())
   } else if (kind === 'stream') {
@@ -205,8 +204,8 @@ function applyQuick(kind) {
 function isActive(kind) {
   if (kind === 'all') return !f.status && !f.errors_only && f.stream === ''
   if (kind === 'ok') return f.status === '200'
-  if (kind === '4xx') return f.errors_only && lastQuick.value === '4xx'
-  if (kind === '5xx') return f.errors_only && lastQuick.value === '5xx'
+  if (kind === '4xx') return f.status === '4xx'
+  if (kind === '5xx') return f.status === '5xx'
   if (kind === 'stream') return f.stream === 'true'
   return false
 }

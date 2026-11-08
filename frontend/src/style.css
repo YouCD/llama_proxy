@@ -61,6 +61,29 @@ html.dark {
   line-height: 1;
 }
 
+/* SSE 实时状态指示器（复用 .live-dot 的三色状态） */
+.live-indicator {
+  display: inline-flex;
+  align-items: center;
+  color: var(--app-muted);
+  font-size: 12px;
+  padding: 5px 10px;
+  border: 1px solid var(--app-line);
+  border-radius: 999px;
+}
+.live-indicator .live-dot {
+  margin-right: 6px;
+}
+.live-live {
+  color: var(--app-ok);
+}
+.live-retry {
+  color: var(--app-warn);
+}
+.live-error {
+  color: var(--app-bad);
+}
+
 body {
   margin: 0;
   background: var(--app-bg);
@@ -204,26 +227,9 @@ html:not(.dark) .panel:hover {
   color: var(--app-muted, #94a3b8);
 }
 
-/* 指标卡片（分组） */
+/* 指标卡片 */
 .stats-groups {
   margin-bottom: 16px;
-}
-.stats-row {
-  display: flex;
-  gap: 16px;
-}
-.stats-group {
-  flex: 1;
-  min-width: 0;
-  margin-bottom: 0;
-}
-.group-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--app-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: 6px;
 }
 .stats-grid {
   display: grid;
@@ -354,10 +360,6 @@ html:not(.dark) .stat-card:hover {
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px dashed var(--app-line);
-}
-.since-unit {
-  color: var(--app-muted);
-  font-size: 12px;
 }
 .adv-toggle {
   color: var(--app-muted);
@@ -608,11 +610,6 @@ html.dark .backend-bar:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.req-ip {
-  margin-left: auto;
-  padding-left: 10px;
-  flex-shrink: 0;
-}
 
 .backend-cell {
   display: inline-block;
@@ -770,6 +767,16 @@ html.dark .backend-bar:hover {
   .lang-btn {
     padding: 4px 8px;
     font-size: 12px;
+  }
+  /* 窄屏只保留状态点，不显示文字 */
+  .live-indicator {
+    padding: 5px 8px;
+  }
+  .live-indicator .live-text {
+    display: none;
+  }
+  .live-indicator .live-dot {
+    margin-right: 0;
   }
   .panel {
     padding: 12px;

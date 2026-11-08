@@ -16,8 +16,6 @@ import (
 	"llama_proxy/internal/store"
 )
 
-
-
 func (s *Server) apiRequests(c *gin.Context) {
 	limit := httpx.QueryInt(c.Request, "limit", 100)
 	offset := httpx.QueryInt(c.Request, "offset", 0)
@@ -70,7 +68,7 @@ func (s *Server) apiRaw(c *gin.Context) {
 	s.handleRaw(c.Writer, "/raw"+c.Param("rest"))
 }
 
-// apiEvents 是 SSE 事件流的 gin 包装。
+// parseRequestFilter 从查询参数解析请求列表/统计的过滤条件。
 func parseRequestFilter(r *http.Request) model.RequestFilter {
 	f := model.RequestFilter{
 		Path:                strings.TrimSpace(r.URL.Query().Get("path")),
@@ -80,10 +78,18 @@ func parseRequestFilter(r *http.Request) model.RequestFilter {
 		ClientIP:            strings.TrimSpace(r.URL.Query().Get("client_ip")),
 		UserAgent:           strings.TrimSpace(r.URL.Query().Get("user_agent")),
 		Search:              strings.TrimSpace(r.URL.Query().Get("q")),
-		StatusCode:          httpx.QueryInt(r, "status", 0),
 		ErrorsOnly:          httpx.QueryBool(r, "errors_only", false),
 		WithTokens:          httpx.QueryBool(r, "with_tokens", false),
 		ChatCompletionsOnly: httpx.QueryBool(r, "chat_completions_only", false),
+	}
+	// status 同时支持精确状态码（如 200）与状态码段（4xx / 5xx，不区分大小写）。
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status"))) {
+	case "4xx":
+		f.StatusClass = "4xx"
+	case "5xx":
+		f.StatusClass = "5xx"
+	default:
+		f.StatusCode = httpx.QueryInt(r, "status", 0)
 	}
 	if t, ok := httpx.ParseTime(r.URL.Query().Get("time_from")); ok {
 		f.TimeFrom = t

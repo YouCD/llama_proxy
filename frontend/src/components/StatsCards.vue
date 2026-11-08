@@ -31,10 +31,11 @@ const props = defineProps({
   windowLabel: { type: String, default: '' },
 })
 
-const groups = computed(() => {
+const allCards = computed(() => {
   const s = props.stats || {}
   const llm = props.llmStats || {}
   const windowLabel = props.windowLabel || ''
+  // 有筛选时展示窗口内命中数，无筛选时展示全生命周期总数（与脚注一致）
   const totalMatching = props.hasFilters
     ? (s.matching_total_requests || 0)
     : (s.lifetime_total_requests || 0)
@@ -47,30 +48,13 @@ const groups = computed(() => {
     : windowLabel
 
   return [
-    {
-      title: t('groupFlow'),
-      cards: [
-        { key: 'reqhour', label: t('metricReqHour'), value: Math.round((s.requests_per_minute || 0) * 60), format: fmtNum, foot: windowLabel, step: 1, tier: 'primary' },
-        { key: 'output', label: t('metricOutputSec'), value: props.outputSec, format: (v) => Math.round(v).toString(), foot: t('metricShownRows'), tier: 'primary' },
-      ],
-    },
-    {
-      title: t('groupQuality'),
-      cards: [
-        { key: 'ttft', label: t('metricAvgTtft'), value: s.avg_first_byte_ms || 0, format: fmtDuration, foot: t('metricFirstToken'), tier: 'secondary' },
-        { key: 'err', label: t('metricErrorRateLLM'), value: llmError, format: fmtPctNum, tone: llmTone, foot: errFoot, tier: 'secondary' },
-      ],
-    },
-    {
-      title: t('groupResource'),
-      cards: [
-        { key: 'total', label: t('metricTotalReq'), value: totalMatching, format: fmtNum, foot: windowLabel, step: 1, tier: 'summary' },
-      ],
-    },
+    { key: 'reqhour', label: t('metricReqHour'), value: Math.round((s.requests_per_minute || 0) * 60), format: fmtNum, foot: windowLabel, step: 1, tier: 'primary' },
+    { key: 'output', label: t('metricOutputSec'), value: props.outputSec, format: (v) => Math.round(v).toString(), foot: t('metricShownRows'), tier: 'primary' },
+    { key: 'ttft', label: t('metricAvgTtft'), value: s.avg_first_byte_ms || 0, format: fmtDuration, foot: t('metricFirstToken'), tier: 'secondary' },
+    { key: 'err', label: t('metricErrorRateLLM'), value: llmError, format: fmtPctNum, tone: llmTone, foot: errFoot, tier: 'secondary' },
+    { key: 'total', label: t('metricTotalReq'), value: totalMatching, format: fmtNum, foot: props.hasFilters ? windowLabel : t('lifetime'), step: 1, tier: 'summary' },
   ]
 })
-
-const allCards = computed(() => groups.value.flatMap(g => g.cards))
 </script>
 
 <style scoped>

@@ -1,6 +1,6 @@
 <template>
   <div class="panel">
-    <div class="section-title">{{ t('tokenBreakdownTitle') }}</div>
+    <div class="section-title">{{ t('tokenBreakdownTitle') }} <span class="tb-scope mono">{{ t('lifetime') }}</span></div>
 
     <!-- 总览：三段式构成条 -->
     <div class="tb-overview">
@@ -34,9 +34,9 @@
       <div class="tb-model-row" v-for="m in models" :key="m.model" @click="$emit('select-model', m.model)">
         <span class="tb-model-name" :title="m.model">{{ m.model }}</span>
         <div class="tb-bar tb-bar-sm" :title="barTitle(m)">
-          <div class="tb-seg seg-input" :style="{ width: pct(m.input) }"></div>
-          <div class="tb-seg seg-cached" :style="{ width: pct(m.cached) }"></div>
-          <div class="tb-seg seg-output" :style="{ width: pct(m.output) }"></div>
+          <div class="tb-seg seg-input" :style="{ width: pct(m.input, m.total) }"></div>
+          <div class="tb-seg seg-cached" :style="{ width: pct(m.cached, m.total) }"></div>
+          <div class="tb-seg seg-output" :style="{ width: pct(m.output, m.total) }"></div>
         </div>
         <span class="tb-model-total mono" :title="fmtNum(m.total)">{{ fmtCompact(m.total) }}</span>
         <span class="tb-model-hit mono" :class="hitTone(m.hit)">{{ fmtPctNum(m.hit) }}</span>
@@ -52,19 +52,17 @@ import { fmtNum, fmtCompact, fmtPctNum } from '../utils'
 
 const props = defineProps({
   stats: { type: Object, default: () => ({}) },
-  hasFilters: { type: Boolean, default: false },
 })
 defineEmits(['select-model'])
 
-// 有筛选时用窗口内数据，无筛选时用全生命周期数据（与总览卡片口径一致）
+// Token 构成固定展示全生命周期（lifetime）口径，不受筛选窗口影响
 const total = computed(() => {
   const s = props.stats || {}
-  const prefix = props.hasFilters ? 'total' : 'lifetime'
-  const input = s[`${prefix}_input_tokens`] ?? 0
-  const cached = s[`${prefix}_cached_tokens`] ?? 0
-  const output = s[`${prefix}_completion_tokens`] ?? 0
-  const total = s[`${prefix}_total_tokens`] || (input + cached + output)
-  const hit = s[`${prefix}_cache_hit_pct`] ?? (cached + input > 0 ? (cached / (cached + input)) * 100 : 0)
+  const input = s.lifetime_input_tokens ?? 0
+  const cached = s.lifetime_cached_tokens ?? 0
+  const output = s.lifetime_completion_tokens ?? 0
+  const total = s.lifetime_total_tokens || (input + cached + output)
+  const hit = s.lifetime_cache_hit_pct ?? (cached + input > 0 ? (cached / (cached + input)) * 100 : 0)
   return { input, cached, output, total, hit }
 })
 
@@ -82,8 +80,8 @@ const models = computed(() => {
     .filter((m) => m.total > 0)
 })
 
-function pct(part) {
-  const sum = total.value.total
+// 占比：分母缺省用总览总量（总览条），按模型条需传该模型自身总量
+function pct(part, sum = total.value.total) {
   if (!sum) return '0%'
   return (part / sum) * 100 + '%'
 }
@@ -101,6 +99,18 @@ function hitTone(hit) {
 </script>
 
 <style scoped>
+.section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.tb-scope {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--app-muted, #94a3b8);
+}
+
 .tb-overview {
   display: flex;
   align-items: center;

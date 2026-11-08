@@ -8,7 +8,6 @@ import (
 
 	"llama_proxy/internal/db"
 	"llama_proxy/internal/model"
-
 )
 
 type Store struct {
@@ -100,6 +99,12 @@ func appendRequestFilterSQL(query string, args []any, f model.RequestFilter, isP
 	if f.StatusCode > 0 {
 		query += ` AND status_code = ?`
 		args = append(args, f.StatusCode)
+	}
+	switch f.StatusClass {
+	case "4xx":
+		query += ` AND status_code >= 400 AND status_code < 500`
+	case "5xx":
+		query += ` AND status_code >= 500`
 	}
 	if !f.TimeFrom.IsZero() {
 		query += ` AND created_at >= ?`

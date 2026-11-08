@@ -295,3 +295,47 @@ func TestGetRequestsUserAgentFilter(t *testing.T) {
 		t.Fatalf("expected only ua-1 for substring, got %+v", recs)
 	}
 }
+
+func TestGetRequestsStatusClassFilter(t *testing.T) {
+	svc, _, cleanup := newTestServer(t, "http://example.invalid")
+	defer cleanup()
+
+	now := time.Now().UTC()
+	for _, rec := range []model.RequestRecord{
+		{ID: "s-ok", CreatedAt: now, Method: http.MethodPost, Path: "/v1/chat/completions", StatusCode: http.StatusOK},
+		{ID: "s-404", CreatedAt: now.Add(time.Second), Method: http.MethodPost, Path: "/v1/chat/completions", StatusCode: http.StatusNotFound},
+		{ID: "s-500", CreatedAt: now.Add(2 * time.Second), Method: http.MethodPost, Path: "/v1/chat/completions", StatusCode: http.StatusInternalServerError},
+		{ID: "s-live", CreatedAt: now.Add(3 * time.Second), Method: http.MethodPost, Path: "/v1/chat/completions", StatusCode: 0},
+	} {
+		if err := seedRequest(t, svc, rec); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	// 4xx：只命中 400–499
+	recs, err := svc.store.GetRequests(100, 0, model.RequestFilter{StatusClass: "4xx"})
+	if err != nil {
+		t.Fatalf("getRequests: %v", err)
+	}
+	if len(recs) != 1 || recs[0].ID != "s-404" {
+		t.Fatalf("4xx expected only s-404, got %+v", recs)
+	}
+
+	// 5xx：只命中 ≥500
+	recs, err = svc.store.GetRequests(100, 0, model.RequestFilter{StatusClass: "5xx"})
+	if err != nil {
+		t.Fatalf("getRequests: %v", err)
+	}
+	if len(recs) != 1 || recs[0].ID != "s-500" {
+		t.Fatalf("5xx expected only s-500, got %+v", recs)
+	}
+
+	// 精确状态码仍然生效
+	recs, err = svc.store.GetRequests(100, 0, model.RequestFilter{StatusCode: http.StatusOK})
+	if err != nil {
+		t.Fatalf("getRequests: %v", err)
+	}
+	if len(recs) != 1 || recs[0].ID != "s-ok" {
+		t.Fatalf("200 expected only s-ok, got %+v", recs)
+	}
+}

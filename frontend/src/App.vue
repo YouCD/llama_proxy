@@ -10,6 +10,10 @@
           </div>
         </div>
         <div class="header-actions">
+          <span class="live-indicator" :class="'live-' + liveState" :title="liveText">
+            <span class="live-dot" :class="liveState === 'live' ? 'live' : liveState === 'error' ? 'error' : ''"></span>
+            <span class="live-text">{{ liveText }}</span>
+          </span>
           <span class="lang-btn" :title="t('themeToggle')" @click="toggleTheme">
             <span class="lang-icon">{{ currentTheme === 'dark' ? '☀️' : '🌙' }}</span>
           </span>
@@ -35,7 +39,7 @@
 
       <BackendStats :items="backendStats" :window-sec="timeWindow.secs" @select="onBackendSelect"/>
 
-      <TokenBreakdown :stats="stats" :has-filters="hasFilters" @select-model="onModelSelect"/>
+      <TokenBreakdown :stats="stats" @select-model="onModelSelect"/>
 
       <div class="panel">
         <section class="daily-section">
@@ -86,7 +90,6 @@
 
 <script setup>
 import {computed, onMounted, onUnmounted, reactive, ref, watch} from 'vue'
-import {Refresh} from '@element-plus/icons-vue'
 import StatsCards from './components/StatsCards.vue'
 import SchedulerStatus from './components/SchedulerStatus.vue'
 import BackendStats from './components/BackendStats.vue'
@@ -109,7 +112,7 @@ import {
   fetchStats,
   fetchStatsByBackend,
 } from './api'
-import {fmtDate, statusBucket, todayRange} from './utils'
+import {statusBucket, todayRange} from './utils'
 
 const pageSize = 100
 const locale = computed(() => elementLocale())
@@ -134,8 +137,6 @@ const inflight = ref([])
 const outputSec = ref(0)
 const hasMore = ref(false)
 const loadingMore = ref(false)
-const autoRefresh = ref(true)
-const lastUpdated = ref('-')
 const liveState = ref('retry')
 const liveText = ref(t('connecting'))
 const drawerVisible = ref(false)
@@ -145,8 +146,9 @@ const dailyChart = ref(null)
 
 const hasFilters = computed(() => Object.keys(filters).length > 0)
 
-// 总览/提供商/每日趋势使用固定的默认窗口，不受时间筛选影响（时间筛选只作用于请求列表）
-const timeWindow = computed(() => ({secs: 3600, label: t('filterLast1h')}))
+// 总览/提供商/每日趋势使用固定的默认窗口（与后端 GET /_proxy/stats 默认 24h 一致），
+// 不受时间筛选影响（时间筛选只作用于请求列表）
+const timeWindow = computed(() => ({secs: 24 * 3600, label: t('filterLast24h')}))
 
 const quickCounts = computed(() => {
   const c = {ok: 0, err4xx: 0, err5xx: 0, stream: 0}
@@ -189,7 +191,6 @@ async function loadStats() {
     Object.assign(stats, data)
     Object.keys(llmStats).forEach((k) => delete llmStats[k])
     Object.assign(llmStats, llm)
-    lastUpdated.value = fmtDate(new Date().toISOString())
   } catch (err) {
     setLive('error', t('refreshFailed', {msg: err.message}))
   }
@@ -365,7 +366,6 @@ function connectEvents() {
     const data = JSON.parse(e.data)
     Object.keys(stats).forEach((k) => delete stats[k])
     Object.assign(stats, data)
-    lastUpdated.value = fmtDate(new Date().toISOString())
   })
   eventSource.addEventListener('llmStats', (e) => {
     const data = JSON.parse(e.data)
@@ -391,10 +391,6 @@ function connectEvents() {
     const data = JSON.parse(e.data)
     inflight.value = Array.isArray(data.items) ? data.items : []
   })
-}
-
-function refreshNow() {
-  refreshAll().catch((err) => setLive('error', t('refreshFailed', {msg: err.message})))
 }
 
 onMounted(async () => {

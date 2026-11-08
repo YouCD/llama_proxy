@@ -550,3 +550,29 @@ func TestGetStatsByBackend(t *testing.T) {
 	}
 }
 
+func TestGetStatsStatusClassFilter(t *testing.T) {
+	svc, _, cleanup := newTestServer(t, "http://example.invalid")
+	defer cleanup()
+
+	now := time.Now().UTC()
+	for _, rec := range []model.RequestRecord{
+		{ID: "sc-ok", CreatedAt: now.Add(-30 * time.Minute), Method: http.MethodPost, Path: "/v1/chat/completions", StatusCode: http.StatusOK, PromptTokens: 10, CompletionTokens: 10, TotalTokens: 20},
+		{ID: "sc-404", CreatedAt: now.Add(-20 * time.Minute), Method: http.MethodPost, Path: "/v1/chat/completions", StatusCode: http.StatusNotFound, ErrorText: "not found"},
+		{ID: "sc-500", CreatedAt: now.Add(-10 * time.Minute), Method: http.MethodPost, Path: "/v1/chat/completions", StatusCode: http.StatusInternalServerError, ErrorText: "boom"},
+	} {
+		if err := seedRequest(t, svc, rec); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	stats, err := svc.store.GetStats(model.RequestFilter{StatusClass: "5xx", TimeFrom: now.Add(-time.Hour), TimeTo: time.Now().UTC()})
+	if err != nil {
+		t.Fatalf("get stats: %v", err)
+	}
+	if stats["total_requests"].(int64) != 1 {
+		t.Fatalf("5xx total_requests=%v", stats["total_requests"])
+	}
+	if stats["errors_count"].(int64) != 1 {
+		t.Fatalf("5xx errors_count=%v", stats["errors_count"])
+	}
+}
