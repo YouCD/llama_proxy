@@ -37,6 +37,8 @@
 
       <SchedulerStatus :data="scheduler" :inflight="inflight"/>
 
+      <GpuStats :data="gpu"/>
+
       <BackendStats :items="backendStats" :window-sec="timeWindow.secs" @select="onBackendSelect"/>
 
       <TokenBreakdown :stats="stats" @select-model="onModelSelect"/>
@@ -92,6 +94,7 @@
 import {computed, onMounted, onUnmounted, reactive, ref, watch} from 'vue'
 import StatsCards from './components/StatsCards.vue'
 import SchedulerStatus from './components/SchedulerStatus.vue'
+import GpuStats from './components/GpuStats.vue'
 import BackendStats from './components/BackendStats.vue'
 import TokenBreakdown from './components/TokenBreakdown.vue'
 import DailyChart from './components/DailyChart.vue'
@@ -103,6 +106,7 @@ import {currentTheme, toggleTheme} from './theme'
 import {
   fetchBackends,
   fetchDailyStats,
+  fetchGpu,
   fetchInflight,
   fetchMinuteStats,
   fetchModels,
@@ -134,6 +138,7 @@ const minuteWindow = ref(60)
 const trendStats = ref([])
 const scheduler = ref(null)
 const inflight = ref([])
+const gpu = ref(null)
 const outputSec = ref(0)
 const hasMore = ref(false)
 const loadingMore = ref(false)
@@ -248,6 +253,14 @@ async function loadTrendStats() {
 async function loadScheduler() {
   try {
     scheduler.value = await fetchScheduler()
+  } catch {
+    /* ignore */
+  }
+}
+
+async function loadGpu() {
+  try {
+    gpu.value = await fetchGpu()
   } catch {
     /* ignore */
   }
@@ -391,6 +404,9 @@ function connectEvents() {
     const data = JSON.parse(e.data)
     inflight.value = Array.isArray(data.items) ? data.items : []
   })
+  eventSource.addEventListener('gpu', (e) => {
+    gpu.value = JSON.parse(e.data)
+  })
 }
 
 onMounted(async () => {
@@ -398,7 +414,8 @@ onMounted(async () => {
   connectEvents()
   await refreshAll()
   await loadOptions()
-  // 不再使用轮询定时器，所有数据更新由 SSE 事件驱动
+  // GPU 面板：首次拉取 + SSE 推送（数据变化时后端广播，无轮询定时器）
+  loadGpu().catch(() => { })
 })
 
 onUnmounted(() => {

@@ -177,6 +177,13 @@ const messages = {
     loadMoreFailed: '加载更多失败：{msg}',
     deleteFailed: '删除失败：{msg}',
     bootFailed: '启动失败：{msg}',
+    // GPU 性能（nvidia-smi，5s 轮询 + SSE 推送）
+    gpuTitle: 'GPU 状态',
+    gpuUtil: '利用率',
+    gpuMem: '显存',
+    gpuFan: '风扇',
+    gpuTemp: '温度',
+    gpuPower: '功耗',
     // 调度状态
     schedulerTitle: '推理调度',
     schedModeCoding: '开发 (coding)',
@@ -383,6 +390,13 @@ const messages = {
     loadMoreFailed: 'Load more failed: {msg}',
     deleteFailed: 'Delete failed: {msg}',
     bootFailed: 'Boot failed: {msg}',
+    // GPU performance (nvidia-smi, 5s poll + SSE push)
+    gpuTitle: 'GPU Stats',
+    gpuUtil: 'Util',
+    gpuMem: 'Memory',
+    gpuFan: 'Fan',
+    gpuTemp: 'Temp',
+    gpuPower: 'Power',
     // 调度状态
     schedulerTitle: 'Inference Scheduling',
     schedModeCoding: 'Coding',

@@ -80,6 +80,11 @@ export async function fetchScheduler() {
   return fetchJSON('/_proxy/scheduler')
 }
 
+// GPU 性能快照（nvidia-smi，后端 5s 轮询；无 GPU 时 available=false）
+export async function fetchGpu() {
+  return fetchJSON('/_proxy/gpu')
+}
+
 // 手动触发调度器切换到指定模型（scheduling 中配置的模型 ID）。
 // 返回 {status:"switching"} 或 {status:"skipped"}（coding 租约活跃时跳过）。
 export async function switchSchedulerModel(model) {

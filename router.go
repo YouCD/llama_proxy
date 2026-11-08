@@ -42,6 +42,7 @@ func (s *Server) newRouter() *gin.Engine {
 	pg.Any("/backend-metrics", s.apiBackendMetrics)
 	pg.Any("/scheduler", s.apiScheduler)
 	pg.Any("/scheduler/switch", s.apiSchedulerSwitch)
+	pg.Any("/gpu", s.apiGpu)
 	pg.Any("/request/:id", s.apiRequest)
 	// 通配保留旧版 "/raw/{id}/{request|response}" 的两段式校验（段数不对返回 400）。
 	pg.Any("/raw/*rest", s.apiRaw)
@@ -100,6 +101,7 @@ func (s *Server) apiRoot(c *gin.Context) {
 			"/_proxy/ui",
 			"/_proxy/scheduler",
 			"/_proxy/scheduler/switch",
+			"/_proxy/gpu",
 		},
 	})
 }

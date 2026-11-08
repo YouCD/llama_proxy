@@ -9,6 +9,7 @@ import (
 	"llama_proxy/internal/balancer"
 	"llama_proxy/internal/config"
 	"llama_proxy/internal/events"
+	"llama_proxy/internal/gpustats"
 	"llama_proxy/internal/scheduler"
 	"llama_proxy/internal/store"
 )
@@ -43,6 +44,9 @@ type Server struct {
 	// handleProxy 中包装请求 ctx 生效。不直接改共享 http.Client.Timeout——
 	// 与在途 client.Do 的并发读写是 data race。
 	requestTimeout atomic.Int64
+	// gpu 是 GPU 性能轮询器（nvidia-smi，5s 间隔）；无 GPU 环境可用但返回
+	// available=false。
+	gpu *gpustats.Poller
 
 	sseMu       sync.Mutex
 	sseCancels  map[context.Context]context.CancelFunc

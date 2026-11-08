@@ -16,6 +16,7 @@ import (
 	"llama_proxy/internal/config"
 	"llama_proxy/internal/db"
 	"llama_proxy/internal/events"
+	"llama_proxy/internal/gpustats"
 	"llama_proxy/internal/model"
 	"llama_proxy/internal/scheduler"
 	"llama_proxy/internal/store"
@@ -122,6 +123,12 @@ func main() {
 		log.WithCtx(ctx).Infof("process scheduler enabled: models=%d default_background_group=%s coding_idle_timeout=%s drain=%s kill=%s startup=%s",
 			len(yamlCfg.Scheduling.Models), strings.Join(yamlCfg.Scheduling.DefaultBackgroundGroup(), ","), yamlCfg.Scheduling.Lease.CodingIdleTimeout, yamlCfg.Scheduling.Switch.DrainTimeout, yamlCfg.Scheduling.Switch.KillTimeout, yamlCfg.Scheduling.Switch.StartupTimeout)
 	}
+	// GPU 性能轮询（nvidia-smi，5s）：无 GPU / nvidia-smi 缺失时返回 available=false，
+	// 前端据此隐藏面板，不影响其余功能。
+	gpuPoller := gpustats.NewPoller(5 * time.Second)
+	gpuPoller.OnTick(s.pushGpuEvent)
+	s.gpu = gpuPoller
+	gpuPoller.Start(ctx)
 	go st.CleanupLoop(ctx)
 	// 配置文件动态加载：变更时热更新可动态项，不可热更新项保留旧值并提示重启。
 	go watchConfig(ctx, s, configPath)
