@@ -143,9 +143,9 @@ func (s *Server) reloadConfig(ctx context.Context, newLegacy config.Config, newY
 	// 2) 发布并应用可热更新部分。
 	s.applyConfig(newLegacy, newYaml, newYaml.Backends.List)
 	log.SetLogLevel(newLegacy.LogLevel)
-	if s.client != nil {
-		s.client.Timeout = newLegacy.RequestTimeout
-	}
+	// 代理请求整体超时：写 atomic，handleProxy 经请求 ctx 生效。
+	// 不改共享 http.Client.Timeout（与在途 client.Do 并发读写是 data race）。
+	s.requestTimeout.Store(int64(newLegacy.RequestTimeout))
 	if s.store != nil {
 		s.store.SetRetentionDays(newLegacy.RetentionDays)
 	}

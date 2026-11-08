@@ -39,6 +39,10 @@ type Server struct {
 	client     *http.Client
 	hub        *events.EventHub
 	active     atomic.Int64
+	// requestTimeout 代理请求整体超时（纳秒，atomic 支持配置热更新）：在
+	// handleProxy 中包装请求 ctx 生效。不直接改共享 http.Client.Timeout——
+	// 与在途 client.Do 的并发读写是 data race。
+	requestTimeout atomic.Int64
 
 	sseMu       sync.Mutex
 	sseCancels  map[context.Context]context.CancelFunc

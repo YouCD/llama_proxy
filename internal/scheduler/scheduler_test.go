@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,10 +35,9 @@ func urlPortMarker(readinessURL string) string {
 // fakeProbe 返回一个就绪探测函数：前 attempts 次失败，之后成功。
 
 func fakeProbe(attempts int) func(context.Context, string) bool {
-	n := 0
+	var n int64
 	return func(context.Context, string) bool {
-		n++
-		return n > attempts
+		return atomic.AddInt64(&n, 1) > int64(attempts)
 	}
 }
 

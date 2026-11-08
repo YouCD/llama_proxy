@@ -271,6 +271,7 @@ func (s *Scheduler) ensureBackground(ctx context.Context, modelID string) (chan 
 		s.mu.Lock()
 		coding := s.codingModel != ""
 		sl := s.procs[modelID]
+		sleeping := sl != nil && sl.sleeping
 		s.mu.Unlock()
 		// 常驻模型：coding 态下同样常驻。在运行→直接返回就绪 channel；已退出→
 		// 原地重启（同 background 组态），不按 coding 租约跳过切换。
@@ -281,16 +282,28 @@ func (s *Scheduler) ensureBackground(ctx context.Context, modelID string) (chan 
 			ch := sl.readyCh
 			return ch, nil
 		}
-		// background 组态：成员在运行（就绪或待就绪，含已接管 setsid 服务）时直接
-		// 等待其就绪 channel；成员确认退出时立即重启该成员，其余成员不受影响。
-		if !coding && sl != nil {
-			if !sl.running() {
-				s.restartMember(ctx, modelID)
-			}
+		// 成员在运行（background 组态，或 coding 态下幸存的纯 CPU 成员——不占显存、
+		// 切换不停）：直接等待其就绪 channel。
+		if sl != nil && sl.running() {
 			ch := sl.readyCh
 			return ch, nil
 		}
-		// coding 态且租约仍活跃：跳过切换，避免杀掉正在使用的 coding 进程。
+		// 休眠成员（闲置被停）：直接请求即唤醒路径——原地重启并等新进程就绪。
+		// 组切换不打扰休眠，但按其模型 ID 直连必须唤醒。
+		if sleeping {
+			s.restartMember(ctx, modelID)
+			ch := sl.readyCh
+			return ch, nil
+		}
+		// background 组态：成员确认退出时立即重启该成员，其余成员不受影响。
+		if !coding && sl != nil {
+			s.restartMember(ctx, modelID)
+			ch := sl.readyCh
+			return ch, nil
+		}
+		// coding 态且租约仍活跃（成员未运行，如声明了 gpu 被停让显存的成员）：
+		// 跳过切换，避免杀掉正在使用的 coding 进程。代理层已对此场景返回 503，
+		// 此处防御性保留。
 		if coding && s.codingLeaseActive() {
 			log.WithCtx(ctx).Infof("[scheduler] skip %s switch: coding lease still active", modelID)
 			ch := make(chan struct{})
@@ -317,6 +330,12 @@ func (s *Scheduler) ensureBackground(ctx context.Context, modelID string) (chan 
 
 	chs, err := s.switchTo(ctx, group, config.ModeBackground)
 	ch := chs[modelID]
+	if ch == nil {
+		// 防御：switchTo 对休眠成员不返回就绪 channel（组切换不打扰休眠）。上方首段
+		// 检查本应已唤醒休眠成员；若仍走到这里，返回显式错误而非 nil channel
+		// （nil channel 会让代理层永久阻塞）。
+		return nil, fmt.Errorf("model %s not woken by group switch", modelID)
+	}
 	return ch, err
 }
 

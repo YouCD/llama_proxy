@@ -172,8 +172,11 @@ func (s *Server) pollBackendMetrics(ctx context.Context) {
 	}
 }
 
-// pollBackendMetricsURL 抓取单个后端的 Prometheus 指标并入库。
+// pollBackendMetricsURL 抓取单个后端的 Prometheus 指标并入库。自带 10s 短超时：
+// 共享 client 不再设整体 Timeout，避免挂死的 /metrics 端点阻塞轮询循环。
 func (s *Server) pollBackendMetricsURL(ctx context.Context, baseURL string) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	u := baseURL + "/metrics"
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	resp, err := s.client.Do(req)

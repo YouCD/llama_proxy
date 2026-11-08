@@ -42,6 +42,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	// 优雅起停时 cancelAllProxy 取消它，立即打断上游连接与流式拷贝，Shutdown 不必傻等。
 	ctx, cancelProxy := s.newProxyCtx(r.Context(), requestID)
 	defer cancelProxy()
+	// 代理请求整体超时（配置热更新可改）：包装请求 ctx。含等待模型加载/切换的时间，
+	// 避免模型加载卡死时请求永久挂起。
+	if dt := time.Duration(s.requestTimeout.Load()); dt > 0 {
+		var timeoutCancel context.CancelFunc
+		ctx, timeoutCancel = context.WithTimeout(ctx, dt)
+		defer timeoutCancel()
+	}
 
 	if cfg.MaxRequestBytes > 0 && r.ContentLength > cfg.MaxRequestBytes {
 		httpx.WriteJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "request is too large"})

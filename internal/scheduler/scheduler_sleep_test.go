@@ -144,3 +144,72 @@ func TestSleepSkippedWhenRecentlyActive(t *testing.T) {
 		t.Fatal("expected sleepy NOT to sleep right after being touched")
 	}
 }
+
+// 复现：no_pool 纯 CPU 休眠成员在 coding 态（租约已过期）被直接请求时，
+// 必须原地唤醒并等待就绪，而不是拿到 nil channel 永久阻塞。
+// 纯 CPU 成员 coding 切换时幸存（stopAll 保留），槽位仍在 procs 中且 sleeping=true。
+func TestSleepWakeDuringCodingLeaseExpired(t *testing.T) {
+	url := readinessURLFor(freePort(t))
+	cfg := &config.SchedulingConfig{
+		Models: map[string]config.ProcessConfig{
+			"coding-model": {Mode: config.ModeCoding, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "coding-key"},
+			"sleepy": {
+				Mode:         config.ModeBackground,
+				NoPool:       true,
+				SleepTimeout: 10 * time.Millisecond,
+				Command:      sleepCommand,
+				ReadinessURL: url,
+				Autostart:    true,
+			},
+		},
+	}
+	// 极短租约：coding 切换后立刻过期，模拟"coding 进程还在跑但租约已失效"的窗口。
+	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 500 * time.Millisecond}
+	s := New(cfg, 10*time.Millisecond, sw, &http.Client{})
+	s.SetProbe(fakeProbe(0))
+	ctx := context.Background()
+	if err := s.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// sleepy 闲置休眠
+	time.Sleep(30 * time.Millisecond)
+	s.reconcile(ctx)
+	s.mu.Lock()
+	asleep := s.procs["sleepy"].sleeping
+	s.mu.Unlock()
+	if !asleep {
+		t.Fatal("expected sleepy to be sleeping")
+	}
+	// 切到 coding：纯 CPU 的 sleepy 幸存（槽位保留、仍 sleeping）
+	cReady, err := s.EnsureModel(ctx, "coding-model")
+	if err != nil {
+		t.Fatalf("ensure coding: %v", err)
+	}
+	select {
+	case <-cReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("coding did not become ready")
+	}
+	// 等租约过期
+	time.Sleep(30 * time.Millisecond)
+	if s.codingLeaseActive() {
+		t.Fatal("expected coding lease expired")
+	}
+	// 直连请求休眠的 CPU 成员：必须唤醒并（reconcile 探活后）就绪，不能挂死。
+	ch, err := s.EnsureModel(ctx, "sleepy")
+	if err != nil {
+		t.Fatalf("ensure sleepy: %v", err)
+	}
+	if ch == nil {
+		t.Fatal("EnsureModel returned nil channel; proxy would block forever")
+	}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		s.reconcile(ctx) // 探活 → markSlotReady 关闭新 readyCh
+	}()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sleeping CPU member did not wake during coding state (lease expired)")
+	}
+}

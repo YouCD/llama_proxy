@@ -101,12 +101,13 @@ func main() {
 		balancer:       backendBalancer,
 		staticBackends: yamlCfg.Backends.List,
 		inflight:       make(map[string]*inflightInfo),
-		client: &http.Client{
-			Transport: transport,
-			Timeout:   cfg.RequestTimeout,
-		},
-		hub: events.New(),
+		// 不设 client.Timeout：代理请求超时经 Server.requestTimeout 包装请求 ctx（可热更新）；
+		// 后端 /metrics 抓取自带短超时（pollBackendMetricsURL）。改共享 client 字段与在途
+		// client.Do 并发竞争，不可热改。
+		client: &http.Client{Transport: transport},
+		hub:    events.New(),
 	}
+	s.requestTimeout.Store(int64(cfg.RequestTimeout))
 	// 在途请求计数供 Store 的统计 active_connections 与调度器排空使用。
 	st.Active = func() int64 { return s.active.Load() }
 
