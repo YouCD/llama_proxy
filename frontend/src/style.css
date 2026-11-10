@@ -697,6 +697,16 @@ html.dark .backend-bar:hover {
   border-top: 1px dashed var(--app-muted);
 }
 
+.table-pager {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.table-pager .el-pagination.is-background .el-pager li.is-active {
+  background: var(--el-color-primary);
+}
+
 .empty-idle {
   display: flex;
   align-items: center;

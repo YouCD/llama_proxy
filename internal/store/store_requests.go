@@ -162,6 +162,20 @@ func (st *Store) GetRequests(limit int, offset int, f model.RequestFilter) ([]mo
 	return out, nil
 }
 
+// CountRequests 返回符合筛选条件的请求总数（供前端分页器使用）。
+func (st *Store) CountRequests(f model.RequestFilter) (int, error) {
+	query := `SELECT COUNT(*) FROM requests WHERE 1=1`
+	args := make([]any, 0, 16)
+
+	query, args = appendRequestFilterSQL(query, args, f, st.isPostgres)
+
+	var n int
+	if err := st.db.Raw(query, args...).Scan(&n).Error; err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 func (st *Store) GetRequestByID(id string) (model.RequestRecord, error) {
 	var rec model.RequestRecord
 	err := st.db.Where("id = ?", id).Take(&rec).Error

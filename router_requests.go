@@ -26,7 +26,12 @@ func (s *Server) apiRequests(c *gin.Context) {
 		httpx.WriteJSON(c.Writer, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{"items": recs, "limit": limit, "offset": offset, "filters": f})
+	total, err := s.store.CountRequests(f)
+	if err != nil {
+		httpx.WriteJSON(c.Writer, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{"items": recs, "limit": limit, "offset": offset, "total": total, "filters": f})
 }
 
 // apiInflight 返回当前正在处理（已选中后端、尚未完成）的请求列表，

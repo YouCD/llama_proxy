@@ -71,10 +71,11 @@
 
       <RequestTable
           :items="items"
-          :has-more="hasMore"
-          :loading-more="loadingMore"
+          :total="total"
+          :page="page"
           :page-size="pageSize"
-          @load-more="loadMore"
+          @page-change="onPageChange"
+          @size-change="onPageSizeChange"
           @select="openDetails"
           @select-backend="onBackendSelect"
           @select-client-ip="onClientIPSelect"
@@ -118,7 +119,9 @@ import {
 } from './api'
 import {statusBucket, todayRange} from './utils'
 
-const pageSize = 100
+const pageSize = ref(100)
+const page = ref(1)
+const total = ref(0)
 const locale = computed(() => elementLocale())
 
 const [dayStart, dayEnd] = todayRange()
@@ -140,8 +143,6 @@ const scheduler = ref(null)
 const inflight = ref([])
 const gpu = ref(null)
 const outputSec = ref(0)
-const hasMore = ref(false)
-const loadingMore = ref(false)
 const liveState = ref('retry')
 const liveText = ref(t('connecting'))
 const drawerVisible = ref(false)
@@ -202,12 +203,10 @@ async function loadStats() {
 }
 
 async function loadRequests() {
-  loadingMore.value = false
   try {
-    // 首页刷新恒用 pageSize：不能用 items.value.length（筛选后行数变少会限制取数上限）
-    const data = await fetchRequests(pageSize, 0, {...filters})
+    const data = await fetchRequests(pageSize.value, (page.value - 1) * pageSize.value, {...filters})
     items.value = data.items || []
-    hasMore.value = (data.items || []).length >= pageSize
+    total.value = data.total || 0
     const rates = items.value
         .map((it) => Number(it.decode_tok_per_sec || 0))
         .filter((v) => Number.isFinite(v) && v > 0)
@@ -217,18 +216,15 @@ async function loadRequests() {
   }
 }
 
-async function loadMore() {
-  if (loadingMore.value || !hasMore.value) return
-  loadingMore.value = true
-  try {
-    const data = await fetchRequests(pageSize, items.value.length, {...filters})
-    items.value = items.value.concat(data.items || [])
-    hasMore.value = (data.items || []).length >= pageSize
-  } catch (err) {
-    ElMessage.error(t('loadMoreFailed', {msg: err.message}))
-  } finally {
-    loadingMore.value = false
-  }
+function onPageChange(p) {
+  page.value = p
+  loadRequests().catch((err) => ElMessage.error(t('refreshFailed', {msg: err.message})))
+}
+
+function onPageSizeChange(s) {
+  pageSize.value = s
+  page.value = 1
+  loadRequests().catch((err) => ElMessage.error(t('refreshFailed', {msg: err.message})))
 }
 
 async function loadBackendStats() {
@@ -293,6 +289,7 @@ watch([trendMode, minuteWindow], loadTrendStats)
 
 function onApply(f) {
   setFilters(f)
+  page.value = 1
   refreshAll().catch(() => {
   })
 }
@@ -307,6 +304,7 @@ function onBackendSelect(url) {
     filterPanel.value.setBackend(url)
   }
   filters.backend = url
+  page.value = 1
   refreshAll().catch(() => {
   })
 }
@@ -316,6 +314,7 @@ function onModelSelect(model) {
     filterPanel.value.setModel(model)
   }
   filters.model = model
+  page.value = 1
   refreshAll().catch(() => {
   })
 }
@@ -325,6 +324,7 @@ function onClientIPSelect(ip) {
     filterPanel.value.setClientIP(ip)
   }
   filters.client_ip = ip
+  page.value = 1
   refreshAll().catch(() => {
   })
 }
@@ -334,6 +334,7 @@ function onRangeChange({from, to}) {
   if (filters.time_from === from && filters.time_to === to) return
   filters.time_from = from
   filters.time_to = to
+  page.value = 1
   if (filterPanel.value) filterPanel.value.setTimeRange(from, to)
   loadRequests().catch(() => { })
 }
@@ -343,6 +344,7 @@ function onUserAgentSelect(ua) {
     filterPanel.value.setUserAgent(ua)
   }
   filters.user_agent = ua
+  page.value = 1
   refreshAll().catch(() => {
   })
 }

@@ -14,14 +14,6 @@
           <div class="mono">{{ row._rel }}</div>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colRequest')" min-width="140">
-        <template #default="{ row }">
-          <div class="req-line">
-            <span :class="'method-badge ' + methodClass(row.method)">{{ row.method || '-' }}</span>
-            <span class="mono req-path" :title="reqTitle(row)">{{ row.path || '-' }}</span>
-          </div>
-        </template>
-      </el-table-column>
       <el-table-column v-if="!isMobile" :label="t('colClient')" min-width="90">
         <template #default="{ row }">
           <span
@@ -109,10 +101,17 @@
       </el-table-column>
     </el-table>
 
-    <div v-if="hasMore" style="text-align: center; margin-top: 12px">
-      <el-button :loading="loadingMore" @click="$emit('loadMore')">
-        {{ loadingMore ? t('loading') : t('loadMore', { n: pageSize }) }}
-      </el-button>
+    <div v-if="total > 0" class="table-pager">
+      <el-pagination
+          background
+          layout="total, sizes, prev, pager, next, jumper"
+          :total="total"
+          :current-page="page"
+          :page-size="pageSize"
+          :page-sizes="[50, 100, 200, 500]"
+          @current-change="$emit('page-change', $event)"
+          @size-change="$emit('size-change', $event)"
+      />
     </div>
 
     <el-empty v-if="items.length === 0" :description="t('emptyTitle')">
@@ -130,16 +129,16 @@ import { fetchRaw } from '../api'
 import { useViewport } from '../useViewport'
 import {
   fmtNum, fmtRate, fmtPercent, fmtLatency, fmtTokens, shortQuery, shortenBackendUrl,
-  isCompleted as completed, statusClass, latencyTone, rateTone, cacheTone, methodClass, copyText,
+  isCompleted as completed, statusClass, latencyTone, rateTone, cacheTone, copyText,
 } from '../utils'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
-  hasMore: { type: Boolean, default: false },
-  loadingMore: { type: Boolean, default: false },
+  total: { type: Number, default: 0 },
+  page: { type: Number, default: 1 },
   pageSize: { type: Number, default: 100 },
 })
-const emit = defineEmits(['loadMore', 'select', 'select-backend', 'select-client-ip', 'select-user-agent'])
+const emit = defineEmits(['page-change', 'size-change', 'select', 'select-backend', 'select-client-ip', 'select-user-agent'])
 
 // 移动端隐藏低价值列（客户端 IP / User-Agent / 提示词速率），减少横向滚动距离
 const { isMobile } = useViewport()
@@ -176,9 +175,6 @@ function cacheTip(row) {
 }
 function cacheDotClass(row) {
   return (row.cache_hit_pct || 0) > 0 ? 'hit' : 'miss'
-}
-function reqTitle(row) {
-  return row.query ? `${row.path || ''}?${row.query}` : (row.path || '')
 }
 function fmtRelative(value) {
   const d = new Date(value)

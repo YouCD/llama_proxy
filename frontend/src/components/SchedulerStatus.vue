@@ -45,8 +45,9 @@
                   :class="{ 'mi-current': m.active }"
                 >
                   <span class="mi-id mono" :title="m.id">{{ m.id }}</span>
+                  <span v-if="m.gpu" class="mi-gpu mono">{{ m.gpu }}</span>
                   <span v-if="m.active" class="mi-mode mi-cur-chip">
-                    {{ m.mode }} · {{ t('schedCurrent') }}
+                    {{ m.mode }}
                   </span>
                   <span v-else class="mi-mode" :class="m.mode === 'coding' ? 'mi-coding' : 'mi-bg'">
                     {{ m.mode }}
@@ -59,8 +60,8 @@
       </div>
 
       <!-- 常驻进程 chips：只列正在运行/已就绪的模型（background 组态下为常驻组成员，
-           coding 态下仅当前 coding 模型），完整模型列表由上方「切换模型」下拉承担。
-           “当前”只标在 coding 模型上——background 常驻态所有节点同时在线，不存在唯一“当前” -->
+           coding 态下仅当前 coding 模型），完整模型列表与当前模型标识（整行绿色高亮）
+           由上方「切换模型」下拉承担 -->
       <div class="sched-models">
         <div
           v-for="m in residentModels"
@@ -71,10 +72,10 @@
         >
           <span class="mc-dot"></span>
           <span class="mono mc-id" :title="m.id">{{ m.id }}</span>
+          <span v-if="m.gpu" class="mono mc-gpu" :title="m.gpu">{{ m.gpu }}</span>
           <span v-if="m.pid" class="mono mc-pid">{{ m.pid }}</span>
           <span v-if="m.running && !m.ready && !m.sleeping && !m.fail_count && m.load_started_at" class="mono mc-load">{{ t('schedLoadElapsed', { n: elapsed(m) }) }}</span>
           <span v-else-if="m.ready && m.load_ms != null" class="mono mc-load ok" :title="t('schedLoadTimeTip')">{{ t('schedLoadDone', { n: fmtMs(m.load_ms) }) }}</span>
-          <span v-if="m.mode === 'coding' && m.active" class="mc-cur">{{ t('schedCurrent') }}</span>
         </div>
         <span v-if="!residentModels.length" class="cell-subtle">-</span>
       </div>
@@ -366,6 +367,17 @@ const badgeLabel = computed(() => {
   font-size: 11px;
   color: var(--app-muted);
 }
+/* GPU 徽标：展示配置中声明的 GPU（如 CUDA1），与 GpuStats 面板的 GPU 序号对应 */
+.mc-gpu {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #6ab0f0;
+  background: rgba(106, 176, 240, 0.1);
+  border: 1px solid rgba(106, 176, 240, 0.35);
+  padding: 0 6px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
 .mc-load {
   font-size: 11px;
   color: var(--app-warn);
@@ -376,14 +388,6 @@ const badgeLabel = computed(() => {
 .mc-load.ok {
   color: var(--app-ok);
   background: rgba(22, 163, 74, 0.12);
-}
-.mc-cur {
-  font-size: 10.5px;
-  font-weight: 600;
-  color: #4ade80;
-  background: rgba(34, 197, 94, 0.12);
-  padding: 1px 7px;
-  border-radius: 8px;
 }
 .mc-dot {
   width: 8px;
@@ -463,16 +467,38 @@ const badgeLabel = computed(() => {
 }
 .mi-id {
   flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
+  /* 长模型名（带 GPU 徽标时）截断省略，保证右侧 mode 标签不被推出 300px 弹层 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mi-gpu {
+  flex: none;
+  font-size: 11px;
+  color: #6ab0f0;
+  background: rgba(106, 176, 240, 0.1);
+  border: 1px solid rgba(106, 176, 240, 0.35);
+  padding: 0 6px;
+  border-radius: 8px;
+  white-space: nowrap;
 }
 .mi-mode {
   flex: none;
+  /* "background" / "coding" 都短于 84px，min-width 即统一宽度，右边缘自然对齐 */
   min-width: 84px;
+  /* 与左侧 GPU 徽标拉开间距（10px gap + 6px） */
+  margin-left: 6px;
   text-align: center;
   font-size: 11px;
   padding: 2px 0;
   border-radius: 4px;
+  box-sizing: border-box;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .mi-coding { color: var(--app-warn); background: rgba(200, 160, 90, 0.12); }
 .mi-bg { color: var(--app-muted); background: rgba(140, 160, 190, 0.12); }
