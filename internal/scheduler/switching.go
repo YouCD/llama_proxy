@@ -268,15 +268,20 @@ func (s *Scheduler) preemptLowerPriority(ctx context.Context, mode, target strin
 	prev := s.switchMode
 	prevTarget := s.switchTarget
 	cancel := s.switchCancel
+	initialLoad := s.initialLoad
 	if cancel == nil {
 		s.mu.Unlock()
 		return
 	}
-	// 特例：coding 切 coding 且目标模型不同时，允许抢占正在加载/等待的同级
+	// 特例 1：coding 切 coding 且目标模型不同时，允许抢占正在加载/等待的同级
 	// coding 切换（用户连点切换或改选另一个 coding 模型时，不必等旧模型加载完，
 	// 也不必等旧模型启动失败的空等结束）。
 	samePriorityDifferentTarget := mode == config.ModeCoding && prev == config.ModeCoding && target != "" && target != prevTarget
-	if switchPriority(mode) <= switchPriority(prev) && !samePriorityDifferentTarget {
+	// 特例 2：Start 的一次性初始加载允许被按需 background 请求抢占：手动切换
+	// 模型不必等整个初始加载（上限 startup_timeout）完成。被取消的只是就绪等待，
+	// 其余成员继续在后台加载、由探活循环接管；Start 对抢占豁免 FATAL。
+	initialLoadPreempt := initialLoad && mode == config.ModeBackground && prev == config.ModeBackground
+	if switchPriority(mode) <= switchPriority(prev) && !samePriorityDifferentTarget && !initialLoadPreempt {
 		s.mu.Unlock()
 		return
 	}

@@ -150,6 +150,64 @@ func TestCodingPreemptsBackgroundStartup(t *testing.T) {
 	}
 }
 
+// TestOnDemandBackgroundPreemptsInitialLoad 验证：Start 初始加载期间，手动切换
+// 到按需 background 模型应直接抢占初始加载的就绪等待（而不是排队等整个初始
+// 加载完成）。被取消的只是等待，组内其余成员继续加载（探活循环接管），
+// Start 对抢占豁免 FATAL。
+func TestOnDemandBackgroundPreemptsInitialLoad(t *testing.T) {
+	ondemandURL := readinessURLFor(freePort(t))
+	cfg := &config.SchedulingConfig{
+		Models: map[string]config.ProcessConfig{
+			"bg-model":       {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: readinessURLFor(freePort(t)), APIKey: "bg-key", Autostart: true},
+			"ondemand-model": {Mode: config.ModeBackground, Command: sleepCommand, ReadinessURL: ondemandURL, APIKey: "od-key"},
+		},
+	}
+	sw := config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 3 * time.Second}
+	s := New(cfg, time.Hour, sw, &http.Client{})
+	s.SetProbe(urlAwareProbe(urlPortMarker(ondemandURL))) // on-demand 立即就绪，background 永不就绪
+	ctx := context.Background()
+
+	startDone := make(chan error, 1)
+	go func() { startDone <- s.Start(ctx) }()
+
+	// 等 background 组切换进入就绪等待（模拟大模型仍在加载）。
+	waitSwitchInflight(t, s, "group")
+
+	// 按需 background 请求到达：必须插队抢占初始加载，而不是等 3s background 加载完。
+	t0 := time.Now()
+	ready, err := s.EnsureModel(ctx, "ondemand-model")
+	if err != nil {
+		t.Fatalf("ensure on-demand: %v", err)
+	}
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("on-demand ready channel not closed promptly after preemption")
+	}
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Errorf("EnsureModel took %v; preemption should not wait out the 3s background load", d)
+	}
+
+	// Start 必须把"首次默认 background 组加载被抢占"视为非致命并返回 nil。
+	select {
+	case err := <-startDone:
+		if err != nil {
+			t.Fatalf("Start should not fail when initial background group load is preempted: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not return after preemption")
+	}
+
+	// 组内其余成员未被杀，仍在加载（由探活循环接管就绪）。
+	s.mu.Lock()
+	sl := s.procs["bg-model"]
+	alive := sl != nil && sl.running()
+	s.mu.Unlock()
+	if !alive {
+		t.Fatal("background member should keep loading after preemption (reconcile takes over)")
+	}
+}
+
 // TestCodingPreemptsIdleSwitchBack 验证：运行期空闲切回 background 组的切换在加载
 // 期间被新的 coding 请求抢占，background 切换应快速以"被抢占"错误返回，
 // coding 切换随即完成。

@@ -172,3 +172,60 @@ func TestSchedulerSwitchUnknownModelError(t *testing.T) {
 		t.Fatal("EnsureModel(unknown) = nil error, want error")
 	}
 }
+
+// TestSchedulerStatusIgnoresEvictedSleepingMember 验证：常驻组成员被同卡换入的其他
+// 模型驱逐（计划内休眠）后，background 整体就绪不应永久停在 false（面板会一直显示
+// “加载中”），且被驱逐成员不再携带进行中的加载计时（load_started_at）。
+func TestSchedulerStatusIgnoresEvictedSleepingMember(t *testing.T) {
+	cfg := &config.SchedulingConfig{
+		Models: map[string]config.ProcessConfig{
+			"bg-a": {
+				Mode:         config.ModeBackground,
+				Command:      "sleep 3600",
+				ReadinessURL: "http://127.0.0.1:1/v1/models",
+				Autostart:    true,
+				GPU:          "CUDA1",
+			},
+			"bg-ondemand": {
+				Mode:         config.ModeBackground,
+				Command:      "sleep 3600",
+				ReadinessURL: "http://127.0.0.1:2/v1/models",
+				GPU:          "CUDA1",
+			},
+		},
+		Lease:  config.LeaseConfig{CodingIdleTimeout: time.Hour},
+		Switch: config.SwitchConfig{DrainTimeout: time.Millisecond, KillTimeout: time.Millisecond, StartupTimeout: 2 * time.Second},
+	}
+	svc := newPoolTestServer(t, cfg, nil, "wrr")
+	if ready := svc.schedulerStatus()["ready"]; ready != true {
+		t.Fatalf("ready = %v after initial group load, want true", ready)
+	}
+
+	// 同卡按需模型换入：bg-a 被驱逐（计划内休眠）。
+	ctx := context.Background()
+	ch, err := svc.scheduler.EnsureModel(ctx, "bg-ondemand")
+	if err != nil {
+		t.Fatalf("ensure on-demand: %v", err)
+	}
+	select {
+	case <-ch:
+	case <-time.After(3 * time.Second):
+		t.Fatal("on-demand model did not become ready")
+	}
+
+	status := svc.schedulerStatus()
+	if ready := status["ready"]; ready != true {
+		t.Fatalf("ready = %v after in-group member evicted, want true (计划内换出不是加载中)", ready)
+	}
+	for _, raw := range status["models"].([]map[string]any) {
+		if raw["id"] != "bg-a" {
+			continue
+		}
+		if raw["sleeping"] != true {
+			t.Fatalf("bg-a sleeping = %v, want true after eviction", raw["sleeping"])
+		}
+		if raw["load_started_at"] != nil {
+			t.Fatalf("bg-a load_started_at = %v, want nil (被驱逐不是加载中)", raw["load_started_at"])
+		}
+	}
+}

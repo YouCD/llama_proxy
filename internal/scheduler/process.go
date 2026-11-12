@@ -206,6 +206,10 @@ func (s *Scheduler) suspendSlot(ctx context.Context, id string, sl *procSlot) {
 	sl.sleeping = true
 	// 立即可观测为未就绪：唤醒前的请求拿到 "not ready"，而非转发到垂死进程。
 	sl.readyOK = false
+	// 清掉进行中的加载计时：被驱逐/休眠的成员不是“加载中”，否则快照会一直
+	// 携带过期的 load_started_at（面板/接口数据显示为卡在加载）。历史加载耗时
+	// （lastLoadDuration）保留。
+	sl.loadStartedAt = time.Time{}
 	s.mu.Unlock()
 	deadline := time.Now().Add(s.sw.KillTimeout)
 	s.stopSlotProcess(sl, deadline)

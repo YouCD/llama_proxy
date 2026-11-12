@@ -101,12 +101,13 @@ func (s *Server) schedulerStatus() map[string]any {
 	}
 	if mode != "coding" && len(snap.Group) > 0 {
 		mode = "background"
-		// 只要求常驻组内的入池成员就绪；no_pool 专用模型（含计划内休眠）不参与代理池
-		// 流量，其就绪与否不决定整体 background 就绪——否则休眠模型会让面板一直显示
-		// “切换到 background”。
+		// 只要求常驻组内参与代理池的成员就绪：
+		//   - no_pool 专用模型（含计划内休眠）不参与代理池流量；
+		//   - sleeping 成员是被调度器停掉的（闲置休眠，或被同卡换入的其他模型驱逐），
+		//     属计划内状态、不是加载中。两者若计入，面板会永久停在“加载中”。
 		allReady = true
 		for _, st := range snap.Models {
-			if st.InGroup && !st.NoPool && !st.Ready {
+			if st.InGroup && !st.NoPool && !st.Sleeping && !st.Ready {
 				allReady = false
 				break
 			}

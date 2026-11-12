@@ -75,6 +75,10 @@ type Scheduler struct {
 	switchMode   string
 	switchCancel context.CancelFunc
 	preempted    bool
+	// initialLoad 标记 Start 的一次性默认组初始加载正在进行：期间按需
+	// background 请求可抢占它（preemptLowerPriority 特例），使手动切换不必等
+	// 整个初始加载（上限 startup_timeout）完成。仅 Start 写入，s.mu 保护。
+	initialLoad bool
 
 	procs       map[string]*procSlot // 已启动/在运行的模型进程槽位（按模型 ID）
 	expected    map[string]bool      // 当前状态下应运行的模型 ID 集合
@@ -155,17 +159,34 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		log.WithCtx(ctx).Infof("[scheduler] no default background model; local processes stay idle until first model request")
 		return nil
 	}
-	if _, err := s.switchTo(ctx, group, config.ModeBackground); err != nil {
+	// 与其余 switchTo 调用方（ensureCoding/ensureBackground/ensureOnDemandBackground）
+	// 一致：持 switchMu 串行化初始加载。否则初始加载等待期间，按需拉起的 GPU 驱逐
+	// （acquireGPU）会杀掉组内仍在加载的成员，waitReady 将其误判为"启动失败"，
+	// Start 对该错误 FATAL（抢占豁免不覆盖此路径）。
+	// initialLoad 标记期间，按需 background 请求可抢占本次加载（见
+	// preemptLowerPriority）：被取消的只是就绪等待，其余成员继续在后台加载并由
+	// 探活循环接管，手动切换不必等整个初始加载完成。
+	s.mu.Lock()
+	s.initialLoad = true
+	s.mu.Unlock()
+	s.switchMu.Lock()
+	_, err := s.switchTo(ctx, group, config.ModeBackground)
+	s.switchMu.Unlock()
+	s.mu.Lock()
+	s.initialLoad = false
+	s.mu.Unlock()
+	if err != nil {
 		// 调用方 ctx 已取消（Ctrl+C 优雅关停）：Shutdown 会杀掉正在加载的成员，
 		// 首次加载被打断不是错误——main.go 对 Start 的任何错误都会 Fatalf，必须放行。
 		if ctx.Err() != nil {
 			log.WithCtx(ctx).Infof("[scheduler] initial background start interrupted by shutdown: %v", err)
 			return nil
 		}
-		// 若首次默认 background 组加载期间有 coding 请求到达并抢占了它，则这不是
-		// 致命错误：coding 切换已在进行，而 main.go 对 Start 的任何错误都会 Fatalf。
+		// 若首次默认 background 组加载期间有更高优先级请求（coding，或按需
+		// background）到达并抢占了它，则这不是致命错误：抢占方已在接管，
+		// 而 main.go 对 Start 的任何错误都会 Fatalf。
 		if s.wasPreempted() {
-			log.WithCtx(ctx).Infof("[scheduler] initial background start preempted by coding request; continuing")
+			log.WithCtx(ctx).Infof("[scheduler] initial background start preempted by higher-priority request; continuing")
 			return nil
 		}
 		return fmt.Errorf("initial background start: %w", err)
