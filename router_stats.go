@@ -128,6 +128,33 @@ func (s *Server) apiBackends(c *gin.Context) {
 	httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Server) apiPaths(c *gin.Context) {
+	items, err := s.store.GetPaths()
+	if err != nil {
+		httpx.WriteJSON(c.Writer, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) apiClientIPs(c *gin.Context) {
+	items, err := s.store.GetClientIPs()
+	if err != nil {
+		httpx.WriteJSON(c.Writer, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) apiUserAgents(c *gin.Context) {
+	items, err := s.store.GetUserAgents()
+	if err != nil {
+		httpx.WriteJSON(c.Writer, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	httpx.WriteJSON(c.Writer, http.StatusOK, map[string]any{"items": items})
+}
+
 func (s *Server) apiBackendMetrics(c *gin.Context) {
 	limit := httpx.QueryInt(c.Request, "limit", 200)
 	items, err := s.store.GetBackendMetrics(limit)

@@ -512,7 +512,7 @@ html.dark .backend-bar:hover {
 .metric-cell {
   display: flex;
   flex-direction: column;
-  align-items: flex-start; /* 左对齐：同一列数值与标签左缘对齐 */
+  align-items: center; /* 居中：数值相对标签水平居中 */
   color: var(--app-muted);
   font-size: 10px;
   line-height: 1.2; /* 固定行高：防止 CJK 回退字体抬高行盒导致标签错位 */
@@ -560,7 +560,7 @@ html.dark .backend-bar:hover {
   display: flex;
   gap: 12px;
   align-items: center;
-  padding-bottom: 4px;
+  height: 32px;
 }
 
 /* 状态标签 */
@@ -660,6 +660,8 @@ html.dark .backend-bar:hover {
   min-width: 0;
 }
 .model-name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

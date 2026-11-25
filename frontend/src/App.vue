@@ -65,7 +65,7 @@
         </section>
       </div>
 
-      <FilterPanel ref="filterPanel" :models="models" :backends="backends" :quick-counts="quickCounts"
+      <FilterPanel ref="filterPanel" :models="models" :backends="backends" :paths="paths" :clientIPs="clientIPs" :user-agents="userAgents" :quick-counts="quickCounts"
                    @apply="onApply" @reset="onFilterReset"/>
 
 
@@ -111,6 +111,9 @@ import {
   fetchInflight,
   fetchMinuteStats,
   fetchModels,
+  fetchPaths,
+  fetchClientIPs,
+  fetchUserAgents,
   fetchRequest,
   fetchRequests,
   fetchScheduler,
@@ -135,6 +138,9 @@ const items = ref([])
 const backendStats = ref([])
 const models = ref([])
 const backends = ref([])
+const paths = ref([])
+const clientIPs = ref([])
+const userAgents = ref([])
 // 趋势图模式：day（最近 30 天，按天）/ minute（按分钟，窗口可选）
 const trendMode = ref('day')
 const minuteWindow = ref(60)
@@ -277,6 +283,18 @@ async function loadOptions() {
   }
   try {
     backends.value = await fetchBackends()
+  } catch { /* ignore */
+  }
+  try {
+    paths.value = await fetchPaths()
+  } catch { /* ignore */
+  }
+  try {
+    clientIPs.value = await fetchClientIPs()
+  } catch { /* ignore */
+  }
+  try {
+    userAgents.value = await fetchUserAgents()
   } catch { /* ignore */
   }
 }

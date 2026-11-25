@@ -458,3 +458,24 @@ func (st *Store) GetBackends() ([]string, error) {
 		WHERE backend_url IS NOT NULL AND TRIM(backend_url) != ''
 		ORDER BY backend_url ASC`, 16)
 }
+
+func (st *Store) GetPaths() ([]string, error) {
+	return scanDistinctStrings(st.db, `SELECT DISTINCT path
+		FROM requests
+		WHERE path IS NOT NULL AND TRIM(path) != ''
+		ORDER BY path ASC`, 16)
+}
+
+func (st *Store) GetClientIPs() ([]string, error) {
+	return scanDistinctStrings(st.db, `SELECT DISTINCT client_ip
+		FROM requests
+		WHERE client_ip IS NOT NULL AND TRIM(client_ip) != ''
+		ORDER BY client_ip ASC`, 64)
+}
+
+func (st *Store) GetUserAgents() ([]string, error) {
+	return scanDistinctStrings(st.db, `SELECT DISTINCT user_agent
+		FROM requests
+		WHERE user_agent IS NOT NULL AND TRIM(user_agent) != ''
+		ORDER BY user_agent ASC`, 64)
+}

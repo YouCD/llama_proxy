@@ -57,9 +57,15 @@
     </div>
 
     <div v-show="showAdv" class="filter-bar adv-panel">
-      <el-input :model-value="f.path" :placeholder="t('filterPath')" clearable @update:model-value="v => (f.path = v)" @keyup.enter="apply" style="width: 180px" />
-      <el-input :model-value="f.client_ip" :placeholder="t('filterClient')" clearable @update:model-value="v => (f.client_ip = v)" @keyup.enter="apply" style="width: 140px" />
-      <el-input :model-value="f.user_agent" :placeholder="t('filterUserAgent')" clearable @update:model-value="v => (f.user_agent = v)" @keyup.enter="apply" style="width: 170px" />
+      <el-select :model-value="f.path" :placeholder="t('filterPath')" filterable clearable allow-create default-first-option @update:model-value="v => (f.path = v || '')" style="width: 180px">
+        <el-option v-for="p in paths" :key="p" :label="p" :value="p" />
+      </el-select>
+      <el-select :model-value="f.client_ip" :placeholder="t('filterClient')" filterable clearable allow-create default-first-option @update:model-value="v => (f.client_ip = v || '')" style="width: 140px">
+        <el-option v-for="ip in clientIPs" :key="ip" :label="ip" :value="ip" />
+      </el-select>
+      <el-select :model-value="f.user_agent" :placeholder="t('filterUserAgent')" filterable clearable allow-create default-first-option @update:model-value="v => (f.user_agent = v || '')" style="width: 170px">
+        <el-option v-for="ua in userAgents" :key="ua" :label="ua" :value="ua" />
+      </el-select>
       <el-select :model-value="f.method" :placeholder="t('filterMethod')" clearable @update:model-value="v => (f.method = v)" style="width: 110px">
         <el-option v-for="m in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']" :key="m" :label="m" :value="m" />
       </el-select>
@@ -85,6 +91,9 @@ import { todayRange } from '../utils'
 const props = defineProps({
   models: { type: Array, default: () => [] },
   backends: { type: Array, default: () => [] },
+  paths: { type: Array, default: () => [] },
+  clientIPs: { type: Array, default: () => [] },
+  userAgents: { type: Array, default: () => [] },
   quickCounts: { type: Object, default: () => ({ ok: 0, err4xx: 0, err5xx: 0, stream: 0 }) },
 })
 const emit = defineEmits(['apply', 'reset'])

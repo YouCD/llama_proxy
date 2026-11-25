@@ -72,7 +72,7 @@
           <div class="mono">{{ fmtTokens(row.prompt_tokens, row.completion_tokens) }}</div>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colCache')" min-width="76" align="right">
+      <el-table-column :label="t('colCache')" min-width="76" align="center">
         <template #default="{ row }">
           <el-tooltip :content="cacheTip(row)" placement="top">
             <span :class="cacheTone(row.cache_hit_pct || 0)">

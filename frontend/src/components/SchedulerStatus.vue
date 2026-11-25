@@ -98,7 +98,7 @@
           :data="inflight"
           size="small"
           row-key="id"
-          :max-height="160"
+          :height="200"
           class="inflight-table"
         >
           <el-table-column min-width="150">
@@ -565,6 +565,7 @@ const badgeLabel = computed(() => {
   white-space: nowrap;
   display: inline-block;
   max-width: 100%;
+  vertical-align: middle;
 }
 .model-plain {
   font-size: 12.5px;

@@ -55,6 +55,21 @@ export async function fetchBackends() {
   return Array.isArray(data.items) ? data.items : []
 }
 
+export async function fetchPaths() {
+  const data = await fetchJSON('/_proxy/paths')
+  return Array.isArray(data.items) ? data.items : []
+}
+
+export async function fetchClientIPs() {
+  const data = await fetchJSON('/_proxy/client-ips')
+  return Array.isArray(data.items) ? data.items : []
+}
+
+export async function fetchUserAgents() {
+  const data = await fetchJSON('/_proxy/user-agents')
+  return Array.isArray(data.items) ? data.items : []
+}
+
 export async function fetchStatsByBackend(filters = {}) {
   const data = await fetchJSON(`/_proxy/stats-by-backend?${queryString(filters)}`)
   return Array.isArray(data.items) ? data.items : []
