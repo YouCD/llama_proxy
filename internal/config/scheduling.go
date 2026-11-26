@@ -56,6 +56,13 @@ type ProcessConfig struct {
 	// background（常驻，就绪后作为动态节点加入代理池参与负载均衡）。
 	Mode         string `mapstructure:"mode" validate:"omitempty,oneof=coding background"`
 	ReadinessURL string `mapstructure:"readiness_url"`
+	// Model 是该进程对外实际服务的模型 ID（llama-server 的 --alias / vLLM 的
+	// SERVED_NAME），即后端 /v1/models 返回的 ID。调度条目 key 是代理内部名，可能与
+	// 后端服务 ID 不一致（如多副本 qwen3.8-27b-coder390-8000/-8001 共享同一 alias
+	// qwen3.8-27b-coder390）。用途：重启接管（tryAdopt）时按真实服务 ID 校验端口上的
+	// 模型身份，避免 alias 与 key 不同导致接管失败、模型被杀后重载。未配置时回退为
+	// 条目 key（alias 与 key 相同的场景无需配置）。
+	Model string `mapstructure:"model"`
 	// APIKey 是模型进程自身的 API Key（对应 llama-server 的 --api-key）。
 	// 非空时：就绪探测与代理转发均使用 Authorization: Bearer <key>，客户端 key 与后端 key 隔离。
 	APIKey  string `mapstructure:"api_key"`

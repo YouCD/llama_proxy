@@ -20,6 +20,7 @@ type Config struct {
 	ListenAddr         string
 	DataDir            string
 	RetentionDays      int
+	CleanupDBRecords   bool // 定时清理时是否删除数据库历史记录（requests/backend_metrics）；默认 false 永久保留
 	MaxRequestBytes    int64
 	MaxCaptureBytes    int64
 	RequestTimeout     time.Duration
@@ -99,12 +100,17 @@ func (b *BackendConfig) EffectiveTags() map[string]bool {
 
 type ProxyConfig struct {
 	// RetentionDays 数据保留天数：0 表示永久保留（不做清理）；未配置时默认 14。
-	RetentionDays      *int     `mapstructure:"retention_days" validate:"omitempty,gte=0"`
-	MaxRequestBytes    int      `mapstructure:"max_request_bytes" validate:"gt=0"`
-	MaxCaptureBytes    int      `mapstructure:"max_capture_bytes" validate:"gt=0"`
-	RequestTimeout     int      `mapstructure:"request_timeout_seconds" validate:"gt=0"`
+	RetentionDays *int `mapstructure:"retention_days" validate:"omitempty,gte=0"`
+	// CleanupDBRecords 定时清理时是否删除数据库历史记录（requests/backend_metrics 表）；
+	// 默认 false（不删库，只清 raw/ 报文目录）。打开后按 retention_days 清理表记录。
+	CleanupDBRecords *bool `mapstructure:"cleanup_db_records"`
+	MaxRequestBytes  int   `mapstructure:"max_request_bytes" validate:"gt=0"`
+	MaxCaptureBytes  int   `mapstructure:"max_capture_bytes" validate:"gt=0"`
+	RequestTimeout   int   `mapstructure:"request_timeout_seconds" validate:"gt=0"`
 	PollBackendMetrics *bool    `mapstructure:"poll_backend_metrics"`
 	PollInterval       int      `mapstructure:"poll_interval_seconds" validate:"gt=0"`
+	// GPUSampleInterval GPU 状态采样间隔（秒）；默认 1。
+	GPUSampleInterval  int      `mapstructure:"gpu_sample_interval_seconds" validate:"gt=0"`
 	RecordPaths        []string `mapstructure:"record_paths"`
 	APIKey             string   `mapstructure:"api_key"` // 客户端访问 proxy 的 API Key，与后端 api_key 隔离
 }
@@ -243,6 +249,9 @@ func setConfigDefaults(cfg *YAMLConfig) {
 	if cfg.Proxy.PollInterval == 0 {
 		cfg.Proxy.PollInterval = 10
 	}
+	if cfg.Proxy.GPUSampleInterval == 0 {
+		cfg.Proxy.GPUSampleInterval = 1
+	}
 	if cfg.Proxy.PollBackendMetrics == nil {
 		v := true
 		cfg.Proxy.PollBackendMetrics = &v
@@ -289,6 +298,7 @@ func (c *YAMLConfig) ToLegacy() Config {
 		ListenAddr:         c.Server.ListenAddr,
 		DataDir:            c.Server.DataDir,
 		RetentionDays:      *c.Proxy.RetentionDays,
+		CleanupDBRecords:   c.Proxy.CleanupDBRecords != nil && *c.Proxy.CleanupDBRecords,
 		MaxRequestBytes:    int64(c.Proxy.MaxRequestBytes),
 		MaxCaptureBytes:    int64(c.Proxy.MaxCaptureBytes),
 		RequestTimeout:     time.Duration(c.Proxy.RequestTimeout) * time.Second,

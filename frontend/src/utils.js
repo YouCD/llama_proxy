@@ -1,5 +1,25 @@
 import { currentLang } from './i18n'
 
+// ---- UI 状态持久化（localStorage，刷新后恢复用户点过的选择）----
+const UI_PREFIX = 'llmproxy.ui.'
+export function loadUI(key, fallback) {
+  try {
+    const raw = localStorage.getItem(UI_PREFIX + key)
+    if (raw == null) return fallback
+    const v = JSON.parse(raw)
+    return v == null ? fallback : v
+  } catch {
+    return fallback
+  }
+}
+export function saveUI(key, value) {
+  try {
+    localStorage.setItem(UI_PREFIX + key, JSON.stringify(value))
+  } catch {
+    /* 忽略配额/隐私模式异常 */
+  }
+}
+
 export async function copyText(text) {
   if (navigator.clipboard && window.isSecureContext) {
     try {

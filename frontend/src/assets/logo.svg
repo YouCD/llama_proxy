@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+    <defs>
+        <linearGradient id="hexG" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#6366f1"/>
+            <stop offset="100%" stop-color="#06b6d4"/>
+        </linearGradient>
+        <filter id="hexGlow">
+            <feGaussianBlur stdDeviation="4" result="b"/>
+            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+    </defs>
+
+    <!-- 中央六边形 -->
+    <g filter="url(#hexGlow)">
+        <polygon points="64,22 96,40 96,76 64,94 32,76 32,40"
+                 fill="none" stroke="url(#hexG)" stroke-width="2.5" stroke-linejoin="round"/>
+    </g>
+
+    <!-- 中心 llama 字母 L 抽象 -->
+    <path d="M 56 48 L 56 72 L 72 72"
+          fill="none" stroke="url(#hexG)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- 周围小六边形节点 -->
+    <g stroke="url(#hexG)" stroke-width="1.5" fill="none" opacity="0.6">
+        <polygon points="20,30 28,26 36,30 36,38 28,42 20,38" />
+        <polygon points="92,30 100,26 108,30 108,38 100,42 92,38" />
+        <polygon points="20,86 28,82 36,86 36,94 28,98 20,94" />
+        <polygon points="92,86 100,82 108,86 108,94 100,98 92,94" />
+    </g>
+
+    <!-- 连接线 -->
+    <g stroke="url(#hexG)" stroke-width="1.2" opacity="0.4">
+        <line x1="36" y1="34" x2="48" y2="44"/>
+        <line x1="92" y1="34" x2="80" y2="44"/>
+        <line x1="36" y1="90" x2="48" y2="82"/>
+        <line x1="92" y1="90" x2="80" y2="82"/>
+    </g>
+
+    <!-- 数据流动点 -->
+    <circle r="1.8" fill="#22d3ee">
+        <animateMotion dur="2s" repeatCount="indefinite" path="M 36 34 L 64 58"/>
+        <animate attributeName="opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite"/>
+    </circle>
+    <circle r="1.8" fill="#a78bfa">
+        <animateMotion dur="2s" repeatCount="indefinite" path="M 92 90 L 64 78"/>
+        <animate attributeName="opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite"/>
+    </circle>
+</svg>

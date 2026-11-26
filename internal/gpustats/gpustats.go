@@ -34,11 +34,13 @@ type Snapshot struct {
 	Time      string  `json:"time"`
 	Gpus      []GPU   `json:"gpus"`
 	Error     string  `json:"error,omitempty"`
+	// SampleIntervalSec 当前采样间隔（秒），供面板标题展示；0 表示未知。
+	SampleIntervalSec int `json:"sample_interval_sec,omitempty"`
 }
 
 // Poller 周期轮询 nvidia-smi 并缓存最新快照。
 type Poller struct {
-	interval time.Duration
+	interval atomic.Int64 // 纳秒，支持热更新
 	latest   atomic.Pointer[Snapshot]
 	onTick   func(*Snapshot)
 	execFn   func() ([]byte, error) // 抽成变量便于测试替换
@@ -46,9 +48,35 @@ type Poller struct {
 	errLogged bool
 }
 
-// NewPoller 创建轮询器。interval 建议 5s 左右。
+// NewPoller 创建轮询器。interval 建议 1~5s。
 func NewPoller(interval time.Duration) *Poller {
-	return &Poller{interval: interval, execFn: runSMI}
+	p := &Poller{execFn: runSMI}
+	p.interval.Store(interval.Nanoseconds())
+	return p
+}
+
+// IntervalSec 返回当前采样间隔（秒）。
+func (p *Poller) IntervalSec() int {
+	if d := p.interval.Load(); d > 0 {
+		return int(d / int64(time.Second))
+	}
+	return 0
+}
+
+// SetInterval 热更新采样间隔（下一次轮询生效）；已有快照时立即广播一份带新间隔
+// 的副本，面板无需等 GPU 数据变化即可刷新标题。
+func (p *Poller) SetInterval(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	p.interval.Store(d.Nanoseconds())
+	if p.onTick != nil {
+		if snap := p.Latest(); snap != nil {
+			cp := *snap
+			cp.SampleIntervalSec = int(d / time.Second)
+			p.onTick(&cp)
+		}
+	}
 }
 
 // OnTick 注册每次轮询后的回调（如 SSE 广播）。快照与上次完全相同则不回调。
@@ -65,7 +93,7 @@ func (p *Poller) Start(ctx context.Context) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(p.interval):
+			case <-time.After(time.Duration(p.interval.Load())):
 			}
 			p.tick()
 		}
@@ -74,6 +102,9 @@ func (p *Poller) Start(ctx context.Context) {
 
 func (p *Poller) tick() {
 	snap := query(p.execFn)
+	if d := p.interval.Load(); d > 0 {
+		snap.SampleIntervalSec = int(d / int64(time.Second))
+	}
 	p.latest.Store(snap)
 	if snap.Error != "" {
 		// 无 GPU / nvidia-smi 缺失是常见部署形态，只记一次日志，不刷屏。

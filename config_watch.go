@@ -2,7 +2,7 @@
 //
 // 用 fsnotify 监视配置文件，变更去抖后重新 config.Load（全量解码 + 校验）：
 //   - 校验失败（含模型 ID 冲突等跨段校验）：保留旧配置并打错误日志，绝不 crash；
-//   - 可热更新项（proxy 限制/白名单/超时、log_level、ui_allowed_hosts、retention_days、
+//   - 可热更新项（proxy 限制/白名单/超时、GPU 采样间隔、log_level、ui_allowed_hosts、retention_days、
 //     backends 池、routing 规则、scheduling 的 lease/switch 时序）立即生效；
 //   - 无法热更新的项（listen_addr、data_dir、database、轮询参数、
 //     scheduling 进程启动参数 command/model/readiness_url）保留旧值并提示重启。
@@ -148,6 +148,7 @@ func (s *Server) reloadConfig(ctx context.Context, newLegacy config.Config, newY
 	s.requestTimeout.Store(int64(newLegacy.RequestTimeout))
 	if s.store != nil {
 		s.store.SetRetentionDays(newLegacy.RetentionDays)
+		s.store.SetCleanupDBRecords(newLegacy.CleanupDBRecords)
 	}
 	switch {
 	case s.balancer != nil:
@@ -162,6 +163,11 @@ func (s *Server) reloadConfig(ctx context.Context, newLegacy config.Config, newY
 	}
 	if s.scheduler != nil && newYaml.Scheduling != nil {
 		s.scheduler.SetTimings(newYaml.Scheduling.Lease.CodingIdleTimeout, newYaml.Scheduling.Switch)
+	}
+	// GPU 采样间隔：热更新（下一次轮询生效）。
+	if s.gpu != nil && newYaml.Proxy.GPUSampleInterval != oldYaml.Proxy.GPUSampleInterval {
+		s.gpu.SetInterval(time.Duration(newYaml.Proxy.GPUSampleInterval) * time.Second)
+		log.WithCtx(ctx).Infof("gpu sample interval updated to %ds", newYaml.Proxy.GPUSampleInterval)
 	}
 
 	// 3) 广播重载结果（前端面板可感知）。

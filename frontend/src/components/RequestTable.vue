@@ -1,135 +1,109 @@
 <template>
-  <div class="panel">
-    <div class="section-title">{{ t('requestTape') }}</div>
+  <div class="log-panel">
+    <slot name="top" />
+
     <el-table
+      v-if="rows.length"
       :data="rows"
-      :highlight-current-row="true"
+      height="408"
       size="small"
-      :height="isMobile ? 400 : 560"
       :row-class-name="rowClassName"
       @row-click="onRowClick"
     >
-      <el-table-column :label="t('colTime')" width="150" fixed="left">
+      <el-table-column :label="t('colTime')" width="92">
         <template #default="{ row }">
-          <div class="mono">{{ row._rel }}</div>
+          <span class="lg-time" :title="fmtDateTime(row.created_at)">{{ row._time }}</span>
         </template>
       </el-table-column>
-      <el-table-column v-if="!isMobile" :label="t('colClient')" min-width="90">
+      <el-table-column :label="t('colRequest')" min-width="150">
         <template #default="{ row }">
-          <span
-            v-if="row.client_ip"
-            class="mono client-cell"
-            :title="row.client_ip + ' · ' + t('clickToFilter')"
-            @click.stop="onClientIPClick(row)"
-          >{{ row.client_ip }}</span>
-          <span v-else class="cell-subtle">-</span>
-        </template>
-      </el-table-column>
-      <el-table-column v-if="!isMobile" :label="t('colUserAgent')" min-width="120">
-        <template #default="{ row }">
-          <span
-            v-if="row.user_agent"
-            class="mono ua-cell"
-            :title="row.user_agent + ' · ' + t('clickToFilter')"
-            @click.stop="onUserAgentClick(row)"
-          >{{ row.user_agent }}</span>
-          <span v-else class="cell-subtle">-</span>
-        </template>
-      </el-table-column>
-      <el-table-column :label="t('colBackend')" min-width="110">
-        <template #default="{ row }">
-          <span
-            v-if="row.backend_url"
-            class="mono backend-cell"
-            :title="row.backend_url + ' · ' + t('clickToFilter')"
-            @click.stop="onBackendClick(row)"
-          >{{ shortenBackendUrl(row.backend_url) }}</span>
-          <span v-else class="cell-subtle">-</span>
-        </template>
-      </el-table-column>
-      <el-table-column :label="t('colStatus')" width="64" align="center">
-        <template #default="{ row }">
-          <span :class="'status-tag ' + statusClass(row.status_code || 0)">
-            {{ statusText(row) }}
+          <span class="lg-path" :title="row.path + (row.query ? '?' + row.query : '') + ' · ' + t('clickToFilter')" @click.stop="onPathClick(row)">
+            {{ row.path || '-' }}
           </span>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colModel')" min-width="160">
+      <el-table-column :label="t('colModel')" min-width="130">
         <template #default="{ row }">
-          <div class="model-cell">
-            <span :title="row.model || ''" class="model-name">{{ row.model || '-' }}</span>
-            <span v-if="row.is_streaming" class="stream-tag">{{ t('streaming') }}</span>
-          </div>
+          <span class="lg-model" :title="(row.model || '-') + ' · ' + t('clickToFilter')" @click.stop="onModelClick(row)">
+            <span class="lg-model-txt">{{ row.model || '-' }}</span>
+            <span v-if="row.is_streaming" class="stream-dot" style="margin-left: 6px"><i></i></span>
+          </span>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colLatency')" min-width="120" align="right">
+      <el-table-column :label="t('colBackend')" min-width="150" class-name="lg-hide-narrow">
         <template #default="{ row }">
-          <span :class="latencyTone(row.first_byte_ms)">{{ fmtLatency(row.first_byte_ms, row.total_ms, t('live')) }}</span>
+          <span class="lg-backend" :title="(row.backend_url || '-') + ' · ' + t('clickToFilter')" @click.stop="onBackendClick(row)">
+            <span class="lg-backend-txt">{{ row.backend_url ? shortenBackendUrl(row.backend_url) : '-' }}</span>
+          </span>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colTokens')" min-width="120" align="right">
+      <el-table-column :label="t('colClient')" width="130" class-name="lg-hide-narrow">
         <template #default="{ row }">
-          <div class="mono">{{ fmtTokens(row.prompt_tokens, row.completion_tokens) }}</div>
+          <span class="lg-ip" :title="(row.client_ip || '-') + ' · ' + t('clickToFilter')" @click.stop="onClientIPClick(row)">
+            {{ row.client_ip || '-' }}
+          </span>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colCache')" min-width="76" align="center">
+      <el-table-column :label="t('colTtft')" width="84" align="center">
         <template #default="{ row }">
-          <el-tooltip :content="cacheTip(row)" placement="top">
-            <span :class="cacheTone(row.cache_hit_pct || 0)">
-              <span class="cache-dot" :class="cacheDotClass(row)"></span>
-              {{ fmtCache(row.cache_hit_pct || 0) }}
-            </span>
-          </el-tooltip>
+          <span :class="latencyTone(row.first_byte_ms)">{{ fmtDuration(row.first_byte_ms) }}</span>
         </template>
       </el-table-column>
-      <el-table-column v-if="!isMobile" :label="t('colPromptPerSec')" min-width="80" align="right">
+      <el-table-column :label="t('colStatus')" width="84" align="center">
         <template #default="{ row }">
-          <span :class="rateTone(row.decode_tok_per_sec || 0)">{{ fmtRate(row.decode_tok_per_sec || 0) }}</span>
+          <span v-if="isCompleted(row)" class="st-pill" :class="statusPill(row.status_code)">{{ row.status_code }}</span>
+          <span v-else class="stream-dot"><i></i>{{ t('live') }}</span>
         </template>
       </el-table-column>
-      <el-table-column :label="t('colActions')" width="84" fixed="right" align="center">
+      <el-table-column :label="t('colTokens')" width="110" align="right" class-name="lg-hide-narrow">
+        <template #default="{ row }">
+          <span :title="t('colTokens')">{{ fmtNum(row.prompt_tokens || 0) }}/{{ fmtNum(row.completion_tokens || 0) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column :label="t('colCache')" width="70" align="right" class-name="lg-hide-narrow">
+        <template #default="{ row }">
+          <span :title="row.cached_prompt_tokens > 0 ? t('cached', { n: fmtNum(row.cached_prompt_tokens) }) : t('noCache')">
+            {{ row.cache_hit_pct ? Math.round(row.cache_hit_pct) + '%' : '·' }}
+          </span>
+        </template>
+      </el-table-column>
+      <el-table-column :label="t('colActions')" width="80" align="center">
         <template #default="{ row }">
           <div class="row-actions">
-            <el-tooltip :content="t('copyRequest')" placement="top">
-              <el-button text :icon="CopyDocument" size="small" @click.stop="onCopy(row)" />
-            </el-tooltip>
-            <el-tooltip :content="t('viewDetail')" placement="top">
-              <el-button text :icon="View" size="small" :disabled="!completed(row)" @click.stop="onRowClick(row)" />
-            </el-tooltip>
+            <button class="ra-btn" :disabled="copyingId === row.id" :title="t('copyCurlTip')" @click.stop="onCopyCurl(row)"><el-icon><CopyDocument /></el-icon></button>
+            <button class="ra-btn" :title="t('viewDetail')" @click.stop="onView(row)"><el-icon><View /></el-icon></button>
           </div>
         </template>
       </el-table-column>
     </el-table>
 
-    <div v-if="total > 0" class="table-pager">
-      <el-pagination
-          background
-          layout="total, sizes, prev, pager, next, jumper"
-          :total="total"
-          :current-page="page"
-          :page-size="pageSize"
-          :page-sizes="[50, 100, 200, 500]"
-          @current-change="$emit('page-change', $event)"
-          @size-change="$emit('size-change', $event)"
-      />
+    <div v-else class="log-empty">
+      {{ t('emptyTitle') }}
+      <p class="empty-idle"><span class="live-dot live"></span>{{ t('emptyIdle') }}</p>
     </div>
 
-    <el-empty v-if="items.length === 0" :description="t('emptyTitle')">
-      <p>{{ t('emptyDesc') }}</p>
-      <p class="empty-idle"><span class="live-dot live"></span>{{ t('emptyIdle') }}</p>
-    </el-empty>
+    <div v-if="total > 0" class="table-pager">
+      <el-pagination
+        background
+        layout="total, sizes, prev, pager, next, jumper"
+        :total="total"
+        :current-page="page"
+        :page-size="pageSize"
+        :page-sizes="[50, 100, 200, 500]"
+        @current-change="$emit('page-change', $event)"
+        @size-change="$emit('size-change', $event)"
+      />
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { CopyDocument, View } from '@element-plus/icons-vue'
 import { t } from '../i18n'
-import { fetchRaw } from '../api'
-import { useViewport } from '../useViewport'
 import {
-  fmtNum, fmtRate, fmtPercent, fmtLatency, fmtTokens, shortQuery, shortenBackendUrl,
-  isCompleted as completed, statusClass, latencyTone, rateTone, cacheTone, copyText,
+  fmtNum, fmtDuration, fmtDateTime, shortenBackendUrl,
+  isCompleted, latencyTone, copyText,
 } from '../utils'
 
 const props = defineProps({
@@ -138,83 +112,97 @@ const props = defineProps({
   page: { type: Number, default: 1 },
   pageSize: { type: Number, default: 100 },
 })
-const emit = defineEmits(['page-change', 'size-change', 'select', 'select-backend', 'select-client-ip', 'select-user-agent'])
+const emit = defineEmits(['page-change', 'size-change', 'select', 'select-backend', 'select-client-ip', 'select-user-agent', 'select-path', 'select-model', 'toast'])
 
-// 移动端隐藏低价值列（客户端 IP / User-Agent / 提示词速率），减少横向滚动距离
-const { isMobile } = useViewport()
-
-const BREAK_MS = 30 * 60 * 1000
-
-const rows = computed(() => {
-  let prevTs = null
-  return props.items.map((it) => {
-    const ts = new Date(it.created_at).getTime()
-    let breakLine = false
-    if (prevTs !== null && Number.isFinite(ts) && Number.isFinite(prevTs)) {
-      breakLine = Math.abs(ts - prevTs) > BREAK_MS
-    }
-    prevTs = Number.isFinite(ts) ? ts : prevTs
-    return {
-      ...it,
-      _rel: fmtRelative(it.created_at),
-      _break: breakLine,
-    }
-  })
-})
-
-function statusText(row) {
-  return completed(row) ? String(row.status_code || 0) : t('live')
-}
-function fmtCache(v) {
-  return `${Math.round(v || 0)}%`
-}
-function cacheTip(row) {
-  return row.cached_prompt_tokens > 0
-    ? t('cached', { n: fmtNum(row.cached_prompt_tokens) })
-    : t('noCache')
-}
-function cacheDotClass(row) {
-  return (row.cache_hit_pct || 0) > 0 ? 'hit' : 'miss'
-}
-function fmtRelative(value) {
+function fmtTime(value) {
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return ''
   const p = (x) => String(x).padStart(2, '0')
-  return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${d.getHours()}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
+
+const rows = computed(() =>
+  props.items.map((it) => ({ ...it, _time: fmtTime(it.created_at) }))
+)
+
+function statusPill(code) {
+  if (!code) return 'st-200'
+  if (code >= 500) return 'st-5xx'
+  if (code >= 400) return 'st-4xx'
+  return 'st-200'
+}
+
+// 新行入场动画：记录上一轮已见过的 id，本轮新出现的才加 new 类
+const known = ref(new Set())
+const fresh = ref(new Set())
+let firstWatch = true
+watch(
+  () => props.items,
+  (list) => {
+    const cur = new Set((list || []).map((it) => it.id))
+    if (firstWatch) {
+      firstWatch = false
+      known.value = cur
+      return
+    }
+    fresh.value = new Set([...cur].filter((id) => !known.value.has(id)))
+    known.value = cur
+  },
+  { immediate: true },
+)
+function isNew(id) {
+  return fresh.value.has(id)
+}
+
+// el-table 行类名：新行入场动画（与旧 .log-row.new 同一 keyframes）
 function rowClassName({ row }) {
-  return row._break ? 'row-break' : ''
+  return isNew(row.id) ? 'new' : ''
 }
+
 function onRowClick(row) {
-  if (completed(row)) emit('select', row)
+  if (isCompleted(row)) emit('select', row)
 }
 function onBackendClick(row) {
   if (row.backend_url) emit('select-backend', row.backend_url)
 }
+function onPathClick(row) {
+  if (row.path) emit('select-path', row.path)
+}
+function onModelClick(row) {
+  if (row.model) emit('select-model', row.model)
+}
 function onClientIPClick(row) {
   if (row.client_ip) emit('select-client-ip', row.client_ip)
 }
-function onUserAgentClick(row) {
-  if (row.user_agent) emit('select-user-agent', row.user_agent)
+
+// ---- 操作列：复制 curl / 查看详情 ----
+const copyingId = ref(null)
+
+function buildCurl(row, body) {
+  const url = window.location.origin + (row.path || '') + (row.query ? '?' + row.query : '')
+  const lines = [`curl -X ${row.method || 'POST'} '${url}'`, `  -H 'Content-Type: application/json'`]
+  if (row.user_agent) lines.push(`  -H 'User-Agent: ${row.user_agent}'`)
+  if (body) lines.push(`  -d '${body.replace(/'/g, "'\\''")}'`)
+  return lines.map((l, i) => (i < lines.length - 1 ? l + ' \\' : l)).join('\n')
 }
-// 复制为 curl：与详情抽屉同一语义——指向代理自身的 origin（原始请求就是发给
-// 代理的），已完成的请求附上原始请求体（--data-raw），便于直接重放。
-async function onCopy(row) {
-  const method = (row.method || 'GET').toUpperCase()
-  let url = `${window.location.origin}${row.path || ''}`
-  if (row.query) url += `?${row.query}`
-  const esc = (s) => s.replace(/'/g, `'\\''`)
-  const lines = [`curl -X ${method} '${esc(url)}'`, `  -H 'Content-Type: application/json'`]
-  if (completed(row)) {
-    const body = await fetchRaw(row.id, 'request')
-    if (body) lines.push(`  --data-raw '${esc(body)}'`)
-  }
+
+async function onCopyCurl(row) {
+  if (copyingId.value) return
+  copyingId.value = row.id
   try {
-    const ok = await copyText(lines.join(' \\\n'))
-    if (ok) ElMessage.success(t('copied'))
-    else ElMessage.warning(t('copyFailed'))
-  } catch {
-    ElMessage.warning(t('copyFailed'))
+    let body = ''
+    try {
+      const res = await fetch(`/_proxy/raw/${row.id}/request`)
+      if (res.ok) body = await res.text()
+    } catch { /* 原始报文不可用时仍复制不带 body 的 curl */ }
+    const ok = await copyText(buildCurl(row, body))
+    emit('toast', { msg: ok ? t('copied') : t('copyFailed'), icon: ok ? '✓' : '⚠', tc: ok ? 'var(--ok)' : 'var(--bad)' })
+  } finally {
+    copyingId.value = null
   }
+}
+
+function onView(row) {
+  emit('select', row)
 }
 </script>

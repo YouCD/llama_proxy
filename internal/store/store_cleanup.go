@@ -31,17 +31,21 @@ func (st *Store) Cleanup() {
 	if days <= 0 {
 		return
 	}
-	cutoff := time.Now().UTC().AddDate(0, 0, -int(days))
-	cutoffVal := st.createdAtValue(cutoff)
-	if err := db.RetryWrite(func() error {
-		return st.db.Exec(`DELETE FROM requests WHERE created_at < ?`, cutoffVal).Error
-	}); err != nil {
-		log.WithCtx(context.Background()).Infof("cleanup requests failed: %v", err)
-	}
-	if err := db.RetryWrite(func() error {
-		return st.db.Exec(`DELETE FROM backend_metrics WHERE created_at < ?`, cutoffVal).Error
-	}); err != nil {
-		log.WithCtx(context.Background()).Infof("cleanup backend_metrics failed: %v", err)
+	// 数据库历史记录仅在 cleanup_db_records 打开时按 retention_days 删除，
+	// 默认永久保留；raw/ 原始报文目录始终按 retention_days 清理。
+	if st.cleanupDBRecords.Load() {
+		cutoff := time.Now().UTC().AddDate(0, 0, -int(days))
+		cutoffVal := st.createdAtValue(cutoff)
+		if err := db.RetryWrite(func() error {
+			return st.db.Exec(`DELETE FROM requests WHERE created_at < ?`, cutoffVal).Error
+		}); err != nil {
+			log.WithCtx(context.Background()).Infof("cleanup requests failed: %v", err)
+		}
+		if err := db.RetryWrite(func() error {
+			return st.db.Exec(`DELETE FROM backend_metrics WHERE created_at < ?`, cutoffVal).Error
+		}); err != nil {
+			log.WithCtx(context.Background()).Infof("cleanup backend_metrics failed: %v", err)
+		}
 	}
 
 	rawRoot := filepath.Join(st.dataDir, "raw")

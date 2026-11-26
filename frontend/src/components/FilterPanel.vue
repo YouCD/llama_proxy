@@ -1,6 +1,5 @@
 <template>
-  <div class="panel">
-    <div class="section-title">{{ t('filters') }}</div>
+  <div class="filter-panel">
 
     <div class="quick-tags">
       <button
@@ -33,14 +32,6 @@
         :end-placeholder="t('filterEndTime')"
       />
       <div class="filter-tools">
-        <el-input
-          :model-value="f.status"
-          :placeholder="t('filterStatus')"
-          clearable
-          @update:model-value="v => (f.status = v)"
-          @keyup.enter="apply"
-          style="width: 110px"
-        />
         <el-button
           text
           :icon="Filter"
@@ -60,24 +51,16 @@
       <el-select :model-value="f.path" :placeholder="t('filterPath')" filterable clearable allow-create default-first-option @update:model-value="v => (f.path = v || '')" style="width: 180px">
         <el-option v-for="p in paths" :key="p" :label="p" :value="p" />
       </el-select>
-      <el-select :model-value="f.client_ip" :placeholder="t('filterClient')" filterable clearable allow-create default-first-option @update:model-value="v => (f.client_ip = v || '')" style="width: 140px">
-        <el-option v-for="ip in clientIPs" :key="ip" :label="ip" :value="ip" />
+      <el-select :model-value="f.client_ip" :placeholder="t('filterClient')" filterable clearable allow-create default-first-option @update:model-value="v => (f.client_ip = v || '')" style="width: 180px">
+        <el-option v-for="ip in clientIps" :key="ip" :label="ip" :value="ip" />
       </el-select>
-      <el-select :model-value="f.user_agent" :placeholder="t('filterUserAgent')" filterable clearable allow-create default-first-option @update:model-value="v => (f.user_agent = v || '')" style="width: 170px">
+      <el-select :model-value="f.user_agent" :placeholder="t('filterUserAgent')" filterable clearable allow-create default-first-option @update:model-value="v => (f.user_agent = v || '')" style="width: 238px">
         <el-option v-for="ua in userAgents" :key="ua" :label="ua" :value="ua" />
-      </el-select>
-      <el-select :model-value="f.method" :placeholder="t('filterMethod')" clearable @update:model-value="v => (f.method = v)" style="width: 110px">
-        <el-option v-for="m in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']" :key="m" :label="m" :value="m" />
       </el-select>
       <el-select :model-value="f.stream" :placeholder="t('filterStream')" clearable @update:model-value="v => (f.stream = v)" style="width: 110px">
         <el-option :label="t('streaming')" value="true" />
         <el-option :label="t('nonStreaming')" value="false" />
       </el-select>
-      <div class="filter-check">
-        <el-checkbox :model-value="f.errors_only" @update:model-value="v => (f.errors_only = v)">{{ t('filterErrorsOnly') }}</el-checkbox>
-        <el-checkbox :model-value="f.with_tokens" @update:model-value="v => (f.with_tokens = v)">{{ t('filterWithTokens') }}</el-checkbox>
-        <el-checkbox :model-value="f.chat_only" @update:model-value="v => (f.chat_only = v)">{{ t('filterChatOnly') }}</el-checkbox>
-      </div>
     </div>
   </div>
 </template>
@@ -92,7 +75,7 @@ const props = defineProps({
   models: { type: Array, default: () => [] },
   backends: { type: Array, default: () => [] },
   paths: { type: Array, default: () => [] },
-  clientIPs: { type: Array, default: () => [] },
+  clientIps: { type: Array, default: () => [] },
   userAgents: { type: Array, default: () => [] },
   quickCounts: { type: Object, default: () => ({ ok: 0, err4xx: 0, err5xx: 0, stream: 0 }) },
 })
@@ -104,13 +87,9 @@ const f = reactive({
   user_agent: '',
   model: '',
   backend: '',
-  method: '',
   status: '',
   timeRange: todayRange(),
   stream: '',
-  errors_only: false,
-  with_tokens: false,
-  chat_only: false,
 })
 const showAdv = ref(false)
 
@@ -141,16 +120,12 @@ function collect() {
   if (f.user_agent) filters.user_agent = f.user_agent.trim()
   if (f.model) filters.model = f.model
   if (f.backend) filters.backend = f.backend
-  if (f.method) filters.method = f.method
   if (f.status) filters.status = f.status.trim()
   if (f.timeRange && f.timeRange.length === 2 && f.timeRange[0] && f.timeRange[1]) {
     filters.time_from = new Date(f.timeRange[0]).toISOString()
     filters.time_to = new Date(f.timeRange[1]).toISOString()
   }
   if (f.stream !== '') filters.stream = f.stream
-  if (f.errors_only) filters.errors_only = 'true'
-  if (f.with_tokens) filters.with_tokens = 'true'
-  if (f.chat_only) filters.chat_completions_only = 'true'
   return filters
 }
 
@@ -164,13 +139,9 @@ function clearFilters() {
   f.user_agent = ''
   f.model = ''
   f.backend = ''
-  f.method = ''
   f.status = ''
   f.timeRange = todayRange()
   f.stream = ''
-  f.errors_only = false
-  f.with_tokens = false
-  f.chat_only = false
 }
 
 function reset() {
@@ -192,26 +163,23 @@ function applyQuick(kind) {
     emit('reset')
   } else if (kind === 'ok') {
     f.status = '200'
-    f.errors_only = false
     f.stream = ''
     emit('apply', collect())
   } else if (kind === '4xx' || kind === '5xx') {
     // 后端 status 参数支持状态码段过滤（4xx = 400–499，5xx = ≥500），
-    // 直接写入 status 输入框，用户可见且可手动清除。
+    // 直接写入 status，用户可见且可手动清除。
     f.status = kind
-    f.errors_only = false
     f.stream = ''
     emit('apply', collect())
   } else if (kind === 'stream') {
     f.status = ''
-    f.errors_only = false
     f.stream = 'true'
     emit('apply', collect())
   }
 }
 
 function isActive(kind) {
-  if (kind === 'all') return !f.status && !f.errors_only && f.stream === ''
+  if (kind === 'all') return !f.status && f.stream === ''
   if (kind === 'ok') return f.status === '200'
   if (kind === '4xx') return f.status === '4xx'
   if (kind === '5xx') return f.status === '5xx'
@@ -229,6 +197,12 @@ function setBackend(url) {
   if (debounceTimer) clearTimeout(debounceTimer)
   suppressWatch = true
   f.backend = url
+}
+
+function setPath(path) {
+  if (debounceTimer) clearTimeout(debounceTimer)
+  suppressWatch = true
+  f.path = path
 }
 
 function setClientIP(ip) {
@@ -250,7 +224,26 @@ function setTimeRange(fromIso, toIso) {
   f.timeRange = [new Date(fromIso), new Date(toIso)]
 }
 
-defineExpose({ collect, setModel, setBackend, setClientIP, setUserAgent, setTimeRange })
+// 从已应用的 filters 对象回填面板（刷新恢复用，不触发自动 apply）
+function restore(filters) {
+  if (!filters) return
+  if (debounceTimer) clearTimeout(debounceTimer)
+  suppressWatch = true
+  f.path = filters.path || ''
+  f.client_ip = filters.client_ip || ''
+  f.user_agent = filters.user_agent || ''
+  f.model = filters.model || ''
+  f.backend = filters.backend || ''
+  f.status = filters.status || ''
+  f.stream = filters.stream !== undefined ? String(filters.stream) : ''
+  if (filters.time_from && filters.time_to) {
+    const a = new Date(filters.time_from)
+    const b = new Date(filters.time_to)
+    if (!Number.isNaN(a.getTime()) && !Number.isNaN(b.getTime())) f.timeRange = [a, b]
+  }
+}
+
+defineExpose({ collect, setModel, setBackend, setPath, setClientIP, setUserAgent, setTimeRange, restore })
 
 onUnmounted(() => {
   if (debounceTimer) clearTimeout(debounceTimer)

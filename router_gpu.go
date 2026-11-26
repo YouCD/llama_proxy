@@ -22,7 +22,9 @@ func (s *Server) gpuLatest() *gpustats.Snapshot {
 		return &gpustats.Snapshot{Available: false, Gpus: []gpustats.GPU{}}
 	}
 	if snap := s.gpu.Latest(); snap != nil {
-		return snap
+		cp := *snap
+		cp.SampleIntervalSec = s.gpu.IntervalSec()
+		return &cp
 	}
 	return &gpustats.Snapshot{Available: false, Gpus: []gpustats.GPU{}}
 }

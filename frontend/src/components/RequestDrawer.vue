@@ -263,7 +263,7 @@ async function onDelete() {
 }
 .head-path {
   font-size: 15px;
-  color: var(--app-text);
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -275,7 +275,7 @@ async function onDelete() {
   flex-shrink: 0;
 }
 .head-time {
-  color: var(--app-muted);
+  color: var(--muted);
   font-size: 13px;
   white-space: nowrap;
 }
@@ -291,7 +291,7 @@ async function onDelete() {
   background: rgba(248, 81, 73, 0.1);
 }
 .btn-danger:disabled {
-  color: var(--app-muted);
+  color: var(--muted);
 }
 
 .head-meta {
@@ -299,7 +299,7 @@ async function onDelete() {
   align-items: center;
   flex-wrap: wrap;
   gap: 7px;
-  color: var(--app-muted);
+  color: var(--muted);
   font-size: 12.5px;
   margin: 8px 0 0;
 }
@@ -307,22 +307,22 @@ async function onDelete() {
   opacity: 0.6;
 }
 .head-meta .arrow {
-  color: var(--app-cyan);
+  color: var(--cyan);
   margin: 0 2px;
 }
 
 .head-query {
   margin-top: 8px;
   padding: 6px 10px;
-  background: var(--app-panel);
-  border: 1px solid var(--app-line);
+  background: var(--panel);
+  border: 1px solid var(--line);
   border-radius: 6px;
-  color: var(--app-text);
+  color: var(--text);
   font-size: 12px;
   word-break: break-all;
 }
 .q-mark {
-  color: var(--app-cyan);
+  color: var(--cyan);
   margin-right: 6px;
 }
 .head-error {
@@ -342,14 +342,14 @@ async function onDelete() {
   margin-top: 14px;
 }
 .kpi-card {
-  background: var(--app-panel);
-  border: 1px solid var(--app-line);
+  background: var(--panel);
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px 12px;
   min-width: 0;
 }
 .kpi-label {
-  color: var(--app-muted);
+  color: var(--muted);
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -369,15 +369,15 @@ async function onDelete() {
 .kpi-unit {
   font-size: 12px;
   font-weight: 600;
-  color: var(--app-muted);
+  color: var(--muted);
 }
 .kpi-sub {
   font-size: 13px;
   font-weight: 600;
-  color: var(--app-muted);
+  color: var(--muted);
 }
 .kpi-foot {
-  color: var(--app-muted);
+  color: var(--muted);
   font-size: 11px;
   margin-top: 4px;
   white-space: nowrap;
@@ -385,15 +385,15 @@ async function onDelete() {
   text-overflow: ellipsis;
 }
 .kpi-value .arrow {
-  color: var(--app-cyan);
+  color: var(--cyan);
   margin: 0 3px;
   font-weight: 600;
 }
 
 .timeline {
   margin-top: 14px;
-  background: var(--app-panel);
-  border: 1px solid var(--app-line);
+  background: var(--panel);
+  border: 1px solid var(--line);
   border-radius: 8px;
   padding: 12px;
 }
@@ -428,15 +428,15 @@ async function onDelete() {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  color: var(--app-muted);
+  color: var(--muted);
   font-size: 11px;
   margin-top: 6px;
 }
 .tl-legend .tl-ttft-label {
-  color: var(--app-warn);
+  color: var(--warn);
 }
 .tl-legend .tl-done {
-  color: var(--app-ok);
+  color: var(--ok);
 }
 
 .pill-tabs {
@@ -547,9 +547,9 @@ async function onDelete() {
   top: 8px;
   right: 8px;
   z-index: 2;
-  border: 1px solid var(--app-line);
-  background: var(--app-panel);
-  color: var(--app-muted);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
   border-radius: 6px;
   width: 28px;
   height: 28px;
@@ -561,12 +561,12 @@ async function onDelete() {
   opacity: 1;
 }
 .code-copy:hover {
-  color: var(--app-cyan);
-  border-color: var(--app-cyan);
+  color: var(--cyan);
+  border-color: var(--cyan);
 }
 .json-view {
   background: var(--json-bg, #0d1117);
-  border: 1px solid var(--app-line);
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 12px 12px 12px 0;
   flex: 1;
@@ -601,7 +601,7 @@ html:not(.dark) .json-view :deep(.jb) { color: #6b7280; }
   width: 2.6em;
   text-align: right;
   margin-right: 12px;
-  color: var(--app-muted);
+  color: var(--muted);
   user-select: none;
   font-variant-numeric: tabular-nums;
 }

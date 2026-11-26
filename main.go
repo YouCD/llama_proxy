@@ -66,6 +66,7 @@ func main() {
 	}
 
 	st := store.New(database, cfg.DataDir, cfg.RetentionDays)
+	st.SetCleanupDBRecords(cfg.CleanupDBRecords)
 	if err := st.Normalize(); err != nil {
 		log.WithCtx(ctx).Fatalf("normalize db: %v", err)
 	}
@@ -107,6 +108,7 @@ func main() {
 		// client.Do 并发竞争，不可热改。
 		client: &http.Client{Transport: transport},
 		hub:    events.New(),
+		startedAt: time.Now(),
 	}
 	s.requestTimeout.Store(int64(cfg.RequestTimeout))
 	// 在途请求计数供 Store 的统计 active_connections 与调度器排空使用。
@@ -116,6 +118,8 @@ func main() {
 	if yamlCfg.HasScheduling() {
 		scheduler := scheduler.New(yamlCfg.Scheduling, yamlCfg.Scheduling.Lease.CodingIdleTimeout, yamlCfg.Scheduling.Switch, s.client)
 		scheduler.SetActiveCount(func() int64 { return s.active.Load() })
+		// 模型进程不随代理退出而杀：重启后 tryAdopt 检测并接管，不重新加载。
+		scheduler.SetKeepOnShutdown(true)
 		s.scheduler = scheduler
 	}
 
@@ -123,9 +127,9 @@ func main() {
 		log.WithCtx(ctx).Infof("process scheduler enabled: models=%d default_background_group=%s coding_idle_timeout=%s drain=%s kill=%s startup=%s",
 			len(yamlCfg.Scheduling.Models), strings.Join(yamlCfg.Scheduling.DefaultBackgroundGroup(), ","), yamlCfg.Scheduling.Lease.CodingIdleTimeout, yamlCfg.Scheduling.Switch.DrainTimeout, yamlCfg.Scheduling.Switch.KillTimeout, yamlCfg.Scheduling.Switch.StartupTimeout)
 	}
-	// GPU 性能轮询（nvidia-smi，5s）：无 GPU / nvidia-smi 缺失时返回 available=false，
-	// 前端据此隐藏面板，不影响其余功能。
-	gpuPoller := gpustats.NewPoller(5 * time.Second)
+	// GPU 性能轮询（nvidia-smi，间隔可配 proxy.gpu_sample_interval_seconds，默认 1s）：
+	// 无 GPU / nvidia-smi 缺失时返回 available=false，前端据此隐藏面板，不影响其余功能。
+	gpuPoller := gpustats.NewPoller(time.Duration(yamlCfg.Proxy.GPUSampleInterval) * time.Second)
 	gpuPoller.OnTick(s.pushGpuEvent)
 	s.gpu = gpuPoller
 	gpuPoller.Start(ctx)
@@ -160,6 +164,7 @@ func main() {
 			if err != nil {
 				continue
 			}
+			stats["uptime_seconds"] = int(time.Since(s.startedAt).Seconds())
 			s.hub.BroadcastWithType("stats", stats)
 			// LLM 统计（只包含 chat_completions，同一时间窗口）
 			llmFilter := base

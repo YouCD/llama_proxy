@@ -4,8 +4,11 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -220,7 +223,16 @@ func (s *Scheduler) launchSlot(ctx context.Context, id string) *procSlot {
 		log.WithCtx(ctx).Warnf("[scheduler] open log file %s failed: %v", e.LogFile, err)
 	}
 	slot.logFile = f
+	s.mu.Lock()
+	s.procs[id] = slot
+	s.expected[id] = true
+	s.mu.Unlock()
 	if e.Command != "" {
+		// 接管：同一模型的服务已在 readiness_url 上监听（如上一次代理进程退出时
+		// 保留的 background 服务）则直接接管，不重新加载模型。
+		if s.tryAdopt(ctx, id, e) {
+			return slot
+		}
 		// 启动前确认端口无残留监听者（如上一次代理进程遗留的 setsid 服务），
 		// 否则新服务绑定端口会失败、启动超时卡死切换。
 		s.freeOccupiedPort(ctx, slot.port, s.sw.KillTimeout)
@@ -239,11 +251,89 @@ func (s *Scheduler) launchSlot(ctx context.Context, id string) *procSlot {
 			go s.reap(id, cmd)
 		}
 	}
-	s.mu.Lock()
-	s.procs[id] = slot
-	s.expected[id] = true
-	s.mu.Unlock()
 	return slot
+}
+
+// tryAdopt 检测配置模型是否已在 readiness_url 上服务（如上一次代理进程退出时
+// 保留的 background 服务）：是则把槽位置为就绪并接管端口持有进程，返回 true；
+// 否则返回 false，由调用方正常启动进程。
+func (s *Scheduler) tryAdopt(ctx context.Context, id string, e *config.ProcessConfig) bool {
+	if e.ReadinessURL == "" {
+		return false
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	body, ok := s.fetchReadiness(probeCtx, e.ReadinessURL, e.APIKey)
+	if !ok {
+		return false
+	}
+	// 按该进程对外实际服务的模型 ID 校验身份（配置 model 字段，缺省回退条目 key）：
+	// 多副本等场景 alias 与调度 key 不同，直接比对 key 会误判为“其他模型”而放弃接管，
+	// 导致模型每次重启都被杀后重载。
+	want := e.Model
+	if want == "" {
+		want = id
+	}
+	// 响应是 OpenAI models 列表时校验模型身份，避免误接管恰好占用端口的其他模型。
+	if ids, parsed := modelIDsFromJSON(body); parsed {
+		found := false
+		for _, m := range ids {
+			if m == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			log.WithCtx(ctx).Infof("[scheduler] %s: %s serves other models (%s), not adopting (want %s)", id, e.ReadinessURL, strings.Join(ids, ","), want)
+			return false
+		}
+	}
+	s.markSlotReady(id)
+	log.WithCtx(ctx).Infof("[scheduler] %s already running at %s, adopted (no restart)", id, e.ReadinessURL)
+	return true
+}
+
+// fetchReadiness GET readiness_url 并返回响应体（上限 1MB），失败返回 false。
+func (s *Scheduler) fetchReadiness(ctx context.Context, url, apiKey string) ([]byte, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, false
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 500 {
+		return nil, false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, false
+	}
+	return body, true
+}
+
+// modelIDsFromJSON 解析 OpenAI /v1/models 响应的模型 ID 列表；非该格式返回 parsed=false。
+func modelIDsFromJSON(body []byte) ([]string, bool) {
+	var m struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &m); err != nil || m.Data == nil {
+		return nil, false
+	}
+	ids := make([]string, 0, len(m.Data))
+	for _, d := range m.Data {
+		if d.ID != "" {
+			ids = append(ids, d.ID)
+		}
+	}
+	return ids, true
 }
 
 // switchPriority 返回切换模式的抢占优先级：coding > background。

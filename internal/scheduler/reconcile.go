@@ -133,6 +133,28 @@ func (s *Scheduler) reconcile(ctx context.Context) {
 			continue
 		}
 		if it.sl.readyOK {
+			// 无包装命令的槽位（启动时接管 / setsid 派生的独立服务）：探活循环
+			// 是唯一能发现其退出的途径。端口持有者已消失时降级为崩溃态（下一轮
+			// 走常规路径重启/恢复）；先按端口重新解析，避免解析瞬时失败误判。
+			if it.sl.cmd == nil {
+				s.mu.Lock()
+				sl := s.procs[it.id]
+				if sl != nil && sl.cmd == nil && !sl.running() {
+					if sl.port > 0 {
+						if pid, err := resolveServerPID(sl.port); err == nil {
+							sl.serverPID = pid
+						}
+					}
+					if !sl.running() && !sl.sleeping {
+						sl.readyOK = false
+						sl.serverPID = 0
+						s.recordStartupFailLocked(it.id)
+						log.WithCtx(ctx).Warnf("[scheduler] %s adopted server exited (fail #%d)", it.id, s.failCount[it.id])
+					}
+				}
+				s.mu.Unlock()
+				continue
+			}
 			// 就绪且未休眠：判断是否闲置到该休眠（仅 no_pool background 成员可配置
 			// sleep_timeout）。
 			if it.mode == config.ModeBackground && e.SleepTimeout > 0 && s.idleForSleep(it.id, e.SleepTimeout) {

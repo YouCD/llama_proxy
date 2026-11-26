@@ -2,6 +2,7 @@
 package store
 
 import (
+	"sort"
 	"strings"
 	"time"
 
@@ -185,6 +186,7 @@ func (st *Store) GetStatsByBackend(f model.RequestFilter) ([]map[string]any, err
 		backend_url,
 		COUNT(*),
 		COALESCE(SUM(prompt_tokens),0),
+		COALESCE(SUM(cached_prompt_tokens),0),
 		COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(total_tokens),0),
 		COALESCE(AVG(total_ms),0),
@@ -207,13 +209,14 @@ func (st *Store) GetStatsByBackend(f model.RequestFilter) ([]map[string]any, err
 		var backend string
 		var count int64
 		var promptTokens int64
+		var cachedTokens int64
 		var completionTokens int64
 		var totalTokens int64
 		var avgTotalMs float64
 		var avgFirstByteMs float64
 		var errorsCount int64
 		var streamCount int64
-		if err := rows.Scan(&backend, &count, &promptTokens, &completionTokens, &totalTokens,
+		if err := rows.Scan(&backend, &count, &promptTokens, &cachedTokens, &completionTokens, &totalTokens,
 			&avgTotalMs, &avgFirstByteMs, &errorsCount, &streamCount); err != nil {
 			return nil, err
 		}
@@ -225,6 +228,7 @@ func (st *Store) GetStatsByBackend(f model.RequestFilter) ([]map[string]any, err
 			"backend_url":        backend,
 			"requests":           count,
 			"prompt_tokens":      promptTokens,
+			"cached_prompt_tokens": cachedTokens,
 			"completion_tokens":  completionTokens,
 			"total_tokens":       totalTokens,
 			"avg_total_ms":       avgTotalMs,
@@ -235,6 +239,62 @@ func (st *Store) GetStatsByBackend(f model.RequestFilter) ([]map[string]any, err
 		})
 	}
 	return out, rows.Err()
+}
+
+// GetBackendTopModels 返回时间窗口内每个后端按请求数降序的前 maxPerBackend 个模型 ID。
+// 用于面板在后端地址下方展示实际承载的模型（配置未登记 model 的后端也能显示）。
+func (st *Store) GetBackendTopModels(f model.RequestFilter, maxPerBackend int) (map[string][]string, error) {
+	from := f.TimeFrom.UTC()
+	to := f.TimeTo.UTC()
+
+	query := `SELECT backend_url, model, COUNT(*)
+		FROM requests
+		WHERE created_at >= ? AND created_at <= ?
+			AND backend_url IS NOT NULL AND TRIM(backend_url) != ''
+			AND model IS NOT NULL AND TRIM(model) != ''
+		GROUP BY backend_url, model`
+
+	rows, err := st.db.Raw(query, filterTimeArg(from, st.isPostgres), filterTimeArg(to, st.isPostgres)).Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type entry struct {
+		model string
+		count int64
+	}
+	byBackend := make(map[string][]entry)
+	var order []string
+	for rows.Next() {
+		var backend, m string
+		var count int64
+		if err := rows.Scan(&backend, &m, &count); err != nil {
+			return nil, err
+		}
+		if _, ok := byBackend[backend]; !ok {
+			order = append(order, backend)
+		}
+		byBackend[backend] = append(byBackend[backend], entry{model: m, count: count})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make(map[string][]string, len(byBackend))
+	for _, backend := range order {
+		list := byBackend[backend]
+		sort.SliceStable(list, func(i, j int) bool { return list[i].count > list[j].count })
+		if len(list) > maxPerBackend {
+			list = list[:maxPerBackend]
+		}
+		models := make([]string, 0, len(list))
+		for _, e := range list {
+			models = append(models, e.model)
+		}
+		out[backend] = models
+	}
+	return out, nil
 }
 
 func (st *Store) GetDailyStats(days int, f model.RequestFilter) ([]map[string]any, error) {
@@ -272,7 +332,8 @@ func (st *Store) GetDailyStats(days int, f model.RequestFilter) ([]map[string]an
 		COALESCE(SUM(total_tokens),0),
 		COALESCE(SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END),0),
-		COALESCE(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END),0)
+		COALESCE(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END),0),
+		COALESCE(AVG(first_byte_ms),0)
 		FROM requests
 		WHERE 1=1`
 	args := []any{}
@@ -291,8 +352,9 @@ func (st *Store) GetDailyStats(days int, f model.RequestFilter) ([]map[string]an
 	for rows.Next() {
 		var date string
 		var count, promptTok, cachedTok, completionTok, totalTok, okCount, err4xx, err5xx int64
+		var avgFirstByteMs float64
 		if err := rows.Scan(&date, &count, &promptTok, &cachedTok, &completionTok, &totalTok,
-			&okCount, &err4xx, &err5xx); err != nil {
+			&okCount, &err4xx, &err5xx, &avgFirstByteMs); err != nil {
 			return nil, err
 		}
 		out = append(out, map[string]any{
@@ -305,6 +367,7 @@ func (st *Store) GetDailyStats(days int, f model.RequestFilter) ([]map[string]an
 			"ok_requests":          okCount,
 			"err4xx":               err4xx,
 			"err5xx":               err5xx,
+			"avg_first_byte_ms":    avgFirstByteMs,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -347,6 +410,7 @@ func (st *Store) GetMinuteStats(minutes int, f model.RequestFilter) ([]map[strin
 		COALESCE(SUM(cached_prompt_tokens),0),
 		COALESCE(SUM(completion_tokens),0),
 		COALESCE(SUM(total_tokens),0),
+		COALESCE(AVG(first_byte_ms),0),
 		COALESCE(SUM(CASE WHEN status_code = 200 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code < 500 THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN status_code >= 500 THEN 1 ELSE 0 END),0)
@@ -366,11 +430,12 @@ func (st *Store) GetMinuteStats(minutes int, f model.RequestFilter) ([]map[strin
 	for rows.Next() {
 		var minute string
 		var count, promptTok, cachedTok, completionTok, totalTok, okCount, err4xx, err5xx int64
+		var avgFirstByteMs float64
 		if err := rows.Scan(&minute, &count, &promptTok, &cachedTok, &completionTok,
-			&totalTok, &okCount, &err4xx, &err5xx); err != nil {
+			&totalTok, &avgFirstByteMs, &okCount, &err4xx, &err5xx); err != nil {
 			return nil, err
 		}
-		buckets[minute] = []any{count, promptTok, cachedTok, completionTok, totalTok, okCount, err4xx, err5xx}
+		buckets[minute] = []any{count, promptTok, cachedTok, completionTok, totalTok, avgFirstByteMs, okCount, err4xx, err5xx}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -382,7 +447,7 @@ func (st *Store) GetMinuteStats(minutes int, f model.RequestFilter) ([]map[strin
 		key := start.Add(time.Duration(i) * time.Minute).Format("2006-01-02 15:04")
 		vals, ok := buckets[key]
 		if !ok {
-			vals = []any{int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0), int64(0)}
+			vals = []any{int64(0), int64(0), int64(0), int64(0), int64(0), float64(0), int64(0), int64(0), int64(0)}
 		}
 		out = append(out, map[string]any{
 			"minute":               key,
@@ -391,9 +456,10 @@ func (st *Store) GetMinuteStats(minutes int, f model.RequestFilter) ([]map[strin
 			"cached_prompt_tokens": vals[2],
 			"completion_tokens":    vals[3],
 			"total_tokens":         vals[4],
-			"ok_requests":          vals[5],
-			"err4xx":               vals[6],
-			"err5xx":               vals[7],
+			"avg_first_byte_ms":    vals[5],
+			"ok_requests":          vals[6],
+			"err4xx":               vals[7],
+			"err5xx":               vals[8],
 		})
 	}
 	return out, nil

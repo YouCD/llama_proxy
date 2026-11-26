@@ -65,6 +65,7 @@ proxy:
   request_timeout_seconds: 600
   poll_backend_metrics: true
   poll_interval_seconds: 10
+  gpu_sample_interval_seconds: 1  # GPU 状态采样间隔（秒），支持热更新
   # 白名单：仅命中这些路径的请求被转发记录，其余一律 404（精确或前缀匹配）。
   # 默认白名单为 OpenAI 兼容接口，未配置时生效。
   record_paths:

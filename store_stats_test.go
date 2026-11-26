@@ -367,6 +367,38 @@ func TestCleanupDisabledWhenRetentionNonPositive(t *testing.T) {
 	}
 }
 
+func TestCleanupKeepsDBRecordsByDefault(t *testing.T) {
+	svc, database, cleanup := newTestServer(t, "http://example.invalid")
+	defer cleanup()
+
+	// 默认 cleanup_db_records=false：超过保留期的库记录永久保留，raw/ 目录才清理。
+	svc.cfg.RetentionDays = 14
+	svc.store = store.New(database, svc.cfg.DataDir, svc.cfg.RetentionDays)
+	if err := seedRequest(t, svc, model.RequestRecord{
+		ID:         "old-record",
+		CreatedAt:  time.Now().UTC().AddDate(0, 0, -30),
+		Method:     http.MethodPost,
+		Path:       "/completion",
+		StatusCode: http.StatusOK,
+	}); err != nil {
+		t.Fatalf("seed request: %v", err)
+	}
+
+	svc.store.Cleanup()
+
+	if _, err := svc.store.GetRequestByID("old-record"); err != nil {
+		t.Fatalf("expected old record to remain when cleanup_db_records is off, got %v", err)
+	}
+
+	// 打开 cleanup_db_records 后，超过保留期的记录应被删除。
+	svc.store.SetCleanupDBRecords(true)
+	svc.store.Cleanup()
+
+	if _, err := svc.store.GetRequestByID("old-record"); err == nil {
+		t.Fatalf("expected old record to be deleted when cleanup_db_records is on")
+	}
+}
+
 func TestGetDailyStats(t *testing.T) {
 	svc, _, cleanup := newTestServer(t, "http://example.invalid")
 	defer cleanup()

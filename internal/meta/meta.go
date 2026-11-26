@@ -201,6 +201,19 @@ func DetectRequestMeta(body []byte) (isStreaming bool, model string) {
 	return
 }
 
+// DetectMaxTokens 提取请求体声明的目标 token 数（max_tokens，0 = 未声明），
+// 供监控面板展示在途请求的“已生成/目标”进度。
+func DetectMaxTokens(body []byte) int64 {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return 0
+	}
+	if v, ok := m["max_tokens"].(float64); ok && v > 0 {
+		return int64(v)
+	}
+	return 0
+}
+
 // RewriteModel replaces the "model" field in a JSON request body with the
 // backend's actual model ID. It returns the rewritten body and the new model
 // name. If the body is not valid JSON (or has no model field), the original

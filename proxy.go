@@ -84,9 +84,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	s.active.Add(1)
 	s.hub.BroadcastWithType("active", map[string]any{"active_connections": s.active.Load(), "time": time.Now().UTC()})
-	// 登记在途请求（供面板实时展示客户端 IP / User-Agent 等当前请求信息），
+	// 登记在途请求（供面板实时展示客户端 IP / User-Agent / 流式进度），
 	// 所有结束路径（成功/失败/客户端断开）统一经 defer 注销。
-	s.inflightAdd(&inflightInfo{
+	inflightEntry := &inflightInfo{
 		ID:         requestID,
 		ClientIP:   clientIP,
 		UserAgent:  r.UserAgent(),
@@ -96,7 +96,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		BackendURL: firstCand.url,
 		Streaming:  isStreaming,
 		StartedAt:  time.Now().UTC(),
-	})
+		MaxTokens:  meta.DetectMaxTokens(originalBody),
+		Status:     "waiting",
+	}
+	if !isStreaming {
+		inflightEntry.Status = "running"
+	}
+	s.inflightAdd(inflightEntry)
 	// successNode 记录成功转发所在节点：其负载在响应体完全回传前一直计入在途，
 	// 由本 defer 在处理器退出时注销；故障转移/候选耗尽路径的节点在各自分支即时注销。
 	successNode := ""
@@ -248,7 +254,20 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	capturer := meta.NewLimitedBuffer(cfg.MaxCaptureBytes)
 
 	if isStreamingResponse(resp, isStreaming) {
-		copied, firstByteMs, chunks, err = streamCopySSE(w, resp.Body, capturer, started)
+		// 流式进度回写：每个 data 块都回调，限频 ~0.8s 广播一次，避免高频 SSE 风暴。
+		var lastBroadcast time.Time
+		progress := func(fbm float64, n int64) {
+			if fbm <= 0 && n == 0 {
+				return
+			}
+			now := time.Now()
+			if lastBroadcast.IsZero() || now.Sub(lastBroadcast) >= 800*time.Millisecond {
+				lastBroadcast = now
+				inflightEntry.setProgress(fbm, n)
+				s.broadcastInflight()
+			}
+		}
+		copied, firstByteMs, chunks, err = streamCopySSE(w, resp.Body, capturer, started, progress)
 	} else {
 		copied, firstByteMs, err = streamCopy(w, resp.Body, capturer, started)
 	}

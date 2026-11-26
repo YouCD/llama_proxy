@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"llama_proxy/internal/balancer"
 	"llama_proxy/internal/config"
@@ -40,6 +41,8 @@ type Server struct {
 	client     *http.Client
 	hub        *events.EventHub
 	active     atomic.Int64
+	// startedAt 进程启动时间，供面板页脚展示运行时长（stats 响应附带 uptime_seconds）。
+	startedAt  time.Time
 	// requestTimeout 代理请求整体超时（纳秒，atomic 支持配置热更新）：在
 	// handleProxy 中包装请求 ctx 生效。不直接改共享 http.Client.Timeout——
 	// 与在途 client.Do 的并发读写是 data race。

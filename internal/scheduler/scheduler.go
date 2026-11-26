@@ -59,6 +59,8 @@ type Scheduler struct {
 	// probeInterval 就绪探活周期（测试可缩短）。
 	probeInterval time.Duration
 	probe         func(ctx context.Context, url string) bool
+	// keepOnShutdown 退出时保留全部模型进程（不杀），下次启动经 tryAdopt 接管。
+	keepOnShutdown bool
 
 	mu sync.Mutex
 	// switchMu 串行化整个状态切换过程（switchTo），防止并发切换互相覆盖进程槽位。
@@ -130,6 +132,14 @@ func (s *Scheduler) SetProbe(f func(ctx context.Context, url string) bool) *Sche
 	return s
 }
 
+// SetKeepOnShutdown 设置退出时是否保留全部模型进程（不随代理退出而杀，
+// coding 与 background 一视同仁）；保留的进程在下次启动时由 launchSlot 的
+// 接管逻辑（tryAdopt）检测并复用，不重新加载模型。
+func (s *Scheduler) SetKeepOnShutdown(v bool) *Scheduler {
+	s.keepOnShutdown = v
+	return s
+}
+
 // SetTimings 热更新 lease 与 switch 时序参数（Loop 每轮重读 lease，下一 tick 生效）。
 func (s *Scheduler) SetTimings(lease time.Duration, sw config.SwitchConfig) {
 	s.mu.Lock()
@@ -194,12 +204,17 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown 停止全部子进程（优雅退出时调用）。与 stopAll 相同，按端口接管真实
-// 服务进程并整树终止，确保 setsid 派生的推理服务不会残留占用端口/显存。
+// Shutdown 优雅退出时调用。keepOnShutdown 开启时不杀任何模型进程（coding 与
+// background 均保留），下次启动由 tryAdopt 检测并接管，模型不随代理重启而
+// 重新加载；否则按端口接管真实服务进程并整树终止，确保 setsid 派生的推理
+// 服务不会残留占用端口/显存。
 func (s *Scheduler) Shutdown() {
 	s.mu.Lock()
-	slots := make([]*procSlot, 0, len(s.procs))
+	var slots []*procSlot
 	for _, sl := range s.procs {
+		if s.keepOnShutdown {
+			continue
+		}
 		slots = append(slots, sl)
 		// 清空槽位进程引用：主动关停不是启动失败，迟到的 reap 不应记录失败。
 		sl.cmd = nil
@@ -212,6 +227,9 @@ func (s *Scheduler) Shutdown() {
 		if sl.logFile != nil {
 			_ = sl.logFile.Close()
 		}
+	}
+	if s.keepOnShutdown && len(s.procs) > 0 {
+		log.WithCtx(context.Background()).Infof("[scheduler] %d model process(es) kept running (will be adopted on next startup)", len(s.procs))
 	}
 }
 

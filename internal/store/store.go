@@ -15,7 +15,9 @@ type Store struct {
 	dataDir string
 	// retentionDays 数据保留天数，atomic 支持配置热更新（SetRetentionDays）。
 	retentionDays atomic.Int32
-	isPostgres    bool
+	// cleanupDBRecords 定时清理时是否删除数据库历史记录；默认 false（永久保留，只清 raw/）。
+	cleanupDBRecords atomic.Bool
+	isPostgres       bool
 
 	// Active 返回当前在途请求数（用于统计的 active_connections）；nil 按 0 计。
 	Active func() int64
@@ -35,6 +37,11 @@ func New(database db.Database, dataDir string, retentionDays int) *Store {
 // SetRetentionDays 热更新数据保留天数（Cleanup 下一次执行时生效）。
 func (st *Store) SetRetentionDays(days int) {
 	st.retentionDays.Store(int32(days))
+}
+
+// SetCleanupDBRecords 热更新是否删除数据库历史记录（Cleanup 下一次执行时生效）。
+func (st *Store) SetCleanupDBRecords(enabled bool) {
+	st.cleanupDBRecords.Store(enabled)
 }
 
 // activeCount 返回在途请求数（Active 未注入时按 0 计）。

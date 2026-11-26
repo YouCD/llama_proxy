@@ -4,6 +4,7 @@ package main
 
 import (
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -18,6 +19,29 @@ type inflightInfo struct {
 	BackendURL string    `json:"backend_url"`
 	Streaming  bool      `json:"streaming"`
 	StartedAt  time.Time `json:"started_at"`
+	// 实时进度：流式请求由转发循环经 setProgress 回写，供面板展示
+	// “等待首 token / 流式输出”状态、首 token 耗时、已生成 token 数与目标 token 数。
+	FirstByteMs      float64 `json:"first_byte_ms"` // 0 = 尚未收到首字节
+	CompletionTokens int64   `json:"completion_tokens"` // 已生成 token 数（流式：块内 usage 优先，否则按文本长度估算）
+	MaxTokens        int64   `json:"max_tokens"` // 请求体声明的目标 token 数（0 = 未声明）
+	Status           string  `json:"status"` // waiting=等待首 token / streaming=流式输出 / running=处理中（非流式）
+
+	mu sync.Mutex // 保护上述进度字段（写：转发循环；读：inflightList）
+}
+
+// setProgress 回写一条流式请求的实时进度（firstByteMs<=0 表示尚未收到首字节）。
+func (info *inflightInfo) setProgress(firstByteMs float64, tokens int64) {
+	info.mu.Lock()
+	if firstByteMs > 0 {
+		info.FirstByteMs = firstByteMs
+		if info.Status == "waiting" {
+			info.Status = "streaming"
+		}
+	}
+	if tokens > info.CompletionTokens {
+		info.CompletionTokens = tokens
+	}
+	info.mu.Unlock()
 }
 
 // inflightAdd 登记一条在途请求，并向 SSE 订阅者广播最新列表。
